@@ -1,0 +1,5 @@
+node_modules
+dist
+src-tauri/target
+# 运行时配置（含令牌/密码等敏感信息）
+config/
