@@ -69,27 +69,18 @@ impl Default for MonitorModels {
 }
 
 impl MonitorModels {
-    pub fn effective(&self) -> Self {
-        if self.gpt.is_empty()
-            && self.claude.is_empty()
-            && self.grok.is_empty()
-            && self.kimi.is_empty()
-        {
-            Self::default()
-        } else {
-            self.clone()
-        }
+    fn is_empty(&self) -> bool {
+        self.gpt.is_empty() && self.claude.is_empty() && self.grok.is_empty() && self.kimi.is_empty()
     }
 
+    /// 全部配置模型名（去重、去空白）；全空时回退默认
     pub fn all_names(&self) -> Vec<String> {
-        let src = self.effective();
-        let mut names = Vec::new();
-        for list in [src.gpt, src.claude, src.grok, src.kimi] {
-            for name in list {
-                let trimmed = name.trim();
-                if !trimmed.is_empty() && !names.iter().any(|n| n == trimmed) {
-                    names.push(trimmed.to_string());
-                }
+        let src = if self.is_empty() { Self::default() } else { self.clone() };
+        let mut names: Vec<String> = Vec::new();
+        for name in src.gpt.iter().chain(&src.claude).chain(&src.grok).chain(&src.kimi) {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() && !names.iter().any(|n| n == trimmed) {
+                names.push(trimmed.to_string());
             }
         }
         names

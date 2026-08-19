@@ -23,6 +23,3 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
-
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

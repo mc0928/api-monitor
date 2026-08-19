@@ -98,6 +98,13 @@ pub fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+pub fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// sub2api 站点的令牌缓存（仅内存，不落盘）
 #[derive(Debug, Clone)]
 pub struct TokenCache {
@@ -134,12 +141,6 @@ impl AppState {
     pub fn set_result(&self, result: SiteResult) {
         if let Ok(mut map) = self.results.lock() {
             map.insert(result.id.clone(), result);
-        }
-    }
-
-    pub fn clear_result(&self, site_id: &str) {
-        if let Ok(mut map) = self.results.lock() {
-            map.remove(site_id);
         }
     }
 

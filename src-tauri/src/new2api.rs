@@ -16,7 +16,7 @@ const PERF_REQ_TIMEOUT: Duration = Duration::from_secs(5);
 /// New API 换算规则：500000 quota = $1
 const QUOTA_PER_USD: f64 = 500_000.0;
 
-/// new2api：GET /api/user/self 查余额，GET /api/pricing 拉模型广场状态
+/// new2api：查余额（/api/user/self）+ 分组性能（/api/perf-metrics/*）
 pub async fn check(client: &Client, site: &SiteConfig, monitor: &MonitorModels) -> SiteResult {
     let token = site.token.clone().unwrap_or_default();
     if token.trim().is_empty() || token.ends_with("...") {
@@ -26,22 +26,20 @@ pub async fn check(client: &Client, site: &SiteConfig, monitor: &MonitorModels) 
     let base = site.base_url.trim_end_matches('/');
     let token = token.trim().to_string();
 
-    let self_h = {
-        let client = client.clone();
-        let url = format!("{base}/api/user/self");
-        let token = token.clone();
-        tauri::async_runtime::spawn(async move {
-            authorized_get(&client, &url, &token, None, None, 2).await
-        })
-    };
-    let summary_h = {
-        let client = client.clone();
-        let url = format!("{base}/api/perf-metrics/summary?hours=24");
-        let token = token.clone();
-        tauri::async_runtime::spawn(async move {
-            authorized_get(&client, &url, &token, None, None, 1).await
-        })
-    };
+    let self_h = spawn_authorized_get(
+        client.clone(),
+        format!("{base}/api/user/self"),
+        token.clone(),
+        None,
+        2,
+    );
+    let summary_h = spawn_authorized_get(
+        client.clone(),
+        format!("{base}/api/perf-metrics/summary?hours=24"),
+        token.clone(),
+        None,
+        1,
+    );
 
     let summary = match summary_h.await {
         Ok(Ok((status, body))) if (200..300).contains(&status) => {
@@ -56,7 +54,7 @@ pub async fn check(client: &Client, site: &SiteConfig, monitor: &MonitorModels) 
         let base = base.to_string();
         let token = token.clone();
         tauri::async_runtime::spawn(async move {
-            fetch_group_perfs(&client, &base, &token, None, &available).await
+            fetch_group_perfs(&client, &base, &token, &available).await
         })
     };
 
@@ -106,10 +104,8 @@ pub async fn check(client: &Client, site: &SiteConfig, monitor: &MonitorModels) 
 #[derive(Default, Clone)]
 struct GroupPerf {
     group: String,
-    ttft_ms: i64,
     latency_ms: i64,
     success_rate: f64,
-    tps: f64,
     model: String,
 }
 
@@ -133,7 +129,6 @@ async fn fetch_group_perfs(
     client: &Client,
     base: &str,
     token: &str,
-    user_id: Option<&str>,
     models: &[String],
 ) -> HashMap<String, GroupPerf> {
     if models.is_empty() {
@@ -151,10 +146,8 @@ async fn fetch_group_perfs(
                 urlencoding_lite(model)
             );
             let token = token.to_string();
-            let uid = user_id.map(str::to_string);
             handles.push(tauri::async_runtime::spawn(async move {
-                let uid_ref = uid.as_deref();
-                authorized_get(&client, &url, &token, uid_ref, Some(PERF_REQ_TIMEOUT), 0).await
+                authorized_get(&client, &url, &token, Some(PERF_REQ_TIMEOUT), 0).await
             }));
         }
         for handle in handles {
@@ -207,10 +200,8 @@ fn merge_group_perfs(perfs: &mut HashMap<String, GroupPerf>, value: &Value) {
             key,
             GroupPerf {
                 group: name.to_string(),
-                ttft_ms: pick_number(item, "avg_ttft_ms").unwrap_or(0.0) as i64,
                 latency_ms: pick_number(item, "avg_latency_ms").unwrap_or(0.0) as i64,
                 success_rate: pick_number(item, "success_rate").unwrap_or(0.0),
-                tps: pick_number(item, "avg_tps").unwrap_or(0.0),
                 model: model.clone(),
             },
         );
@@ -291,11 +282,22 @@ fn parse_plaza_channels(
     channels
 }
 
+fn spawn_authorized_get(
+    client: Client,
+    url: String,
+    token: String,
+    timeout: Option<Duration>,
+    retries: u32,
+) -> tauri::async_runtime::JoinHandle<Result<(u16, String), String>> {
+    tauri::async_runtime::spawn(async move {
+        authorized_get(&client, &url, &token, timeout, retries).await
+    })
+}
+
 async fn authorized_get(
     client: &Client,
     url: &str,
     token: &str,
-    user_id: Option<&str>,
     timeout: Option<Duration>,
     retries: u32,
 ) -> Result<(u16, String), String> {
@@ -305,9 +307,6 @@ async fn authorized_get(
             .get(url)
             .bearer_auth(token)
             .header("User-Agent", "api-monitor/0.1");
-        if let Some(id) = user_id {
-            req = req.header("New-Api-User", id);
-        }
         if let Some(timeout) = timeout {
             req = req.timeout(timeout);
         }
@@ -335,11 +334,11 @@ fn describe_request_error(err: &reqwest::Error) -> String {
     if err.is_connect() {
         return "无法连接到站点（网络或证书问题）".to_string();
     }
-    let msg = err.to_string();
-    if msg.contains("dns") || msg.to_ascii_lowercase().contains("resolve") {
+    let msg = err.to_string().to_ascii_lowercase();
+    if msg.contains("dns") || msg.contains("resolve") {
         return "域名解析失败".to_string();
     }
-    format!("无法访问站点")
+    "无法访问站点".to_string()
 }
 
 /// 宽松取数字字段：兼容数字与字符串数字
@@ -354,8 +353,6 @@ fn pick_number(obj: &Value, key: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{self, SiteType};
-    use crate::http;
 
     #[test]
     fn parse_plaza_group_perf_table() {
@@ -364,10 +361,8 @@ mod tests {
             "gpt 易燃易爆炸\x1fgpt-5.6-sol".into(),
             GroupPerf {
                 group: "gpt 易燃易爆炸".into(),
-                ttft_ms: 3500,
                 latency_ms: 13740,
                 success_rate: 99.3,
-                tps: 52.6,
                 model: "gpt-5.6-sol".into(),
             },
         );
@@ -375,10 +370,8 @@ mod tests {
             "grok\x1fgrok-4.6".into(),
             GroupPerf {
                 group: "grok".into(),
-                ttft_ms: 3985,
                 latency_ms: 16111,
                 success_rate: 92.2,
-                tps: 40.0,
                 model: "grok-4.6".into(),
             },
         );
@@ -441,44 +434,6 @@ mod tests {
         merge_group_perfs(&mut perfs, &value);
         let vip = perfs.values().find(|p| p.group == "vip").unwrap();
         assert!((vip.success_rate - 99.1).abs() < f64::EPSILON);
-        assert_eq!(vip.ttft_ms, 3430);
-        assert!((vip.tps - 52.4).abs() < f64::EPSILON);
         assert_eq!(vip.model, "gpt-5.6-sol");
-    }
-
-    #[tokio::test]
-    async fn check_real_sites() {
-        let cfg = config::load_config().expect("配置文件应可加载");
-        assert!(!cfg.sites.is_empty(), "配置中应有站点");
-
-        let mut any_ok = false;
-        for site in cfg.sites.iter().filter(|s| s.site_type == SiteType::New2api) {
-            let client = http::build_client(None).unwrap();
-            let result = check(&client, site, &cfg.monitor.models).await;
-            println!(
-                "[{}] {} -> ok={}, balance=${:?}, models={}, note={:?}, error={:?}",
-                site.id,
-                site.name,
-                result.ok,
-                result.balance_usd,
-                result.channels.len(),
-                result.note,
-                result.error
-            );
-            for ch in &result.channels {
-                println!(
-                    "    - {} | {} | avail={:?} | {}ms | {}",
-                    ch.name,
-                    ch.status,
-                    ch.availability,
-                    ch.latency_ms.unwrap_or(0),
-                    ch.detail
-                );
-            }
-            if result.ok {
-                any_ok = true;
-            }
-        }
-        assert!(any_ok, "至少一个 new2api 站点检测成功");
     }
 }

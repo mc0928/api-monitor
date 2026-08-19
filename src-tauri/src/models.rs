@@ -41,11 +41,10 @@ pub fn normalize_model(s: &str) -> String {
         .collect()
 }
 
+/// a 是否为 b 的版本前缀：相等，或 b 在 a 之后紧跟 '-'（归一化后均为 ASCII）
 fn prefix_token(short: &str, long: &str) -> bool {
-    if short.is_empty() || !long.starts_with(short) {
-        return false;
-    }
-    long.len() == short.len() || long.as_bytes().get(short.len()) == Some(&b'-')
+    long.strip_prefix(short)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
 }
 
 pub fn models_match(a: &str, b: &str) -> bool {
@@ -55,31 +54,6 @@ pub fn models_match(a: &str, b: &str) -> bool {
         return false;
     }
     a == b || prefix_token(&a, &b) || prefix_token(&b, &a)
-}
-
-pub fn best_match(available: &[String], wanted: &str) -> Option<String> {
-    let want_n = normalize_model(wanted);
-    if want_n.is_empty() {
-        return None;
-    }
-    if let Some(exact) = available
-        .iter()
-        .find(|item| normalize_model(item) == want_n)
-    {
-        return Some(exact.clone());
-    }
-    let mut cands: Vec<&String> = available
-        .iter()
-        .filter(|item| models_match(item, wanted))
-        .collect();
-    if cands.is_empty() {
-        return None;
-    }
-    cands.sort_by_key(|item| {
-        let n = normalize_model(item);
-        (n.len().abs_diff(want_n.len()), n.len())
-    });
-    Some(cands[0].clone())
 }
 
 pub fn detect_provider(text: &str) -> Option<Provider> {
@@ -172,19 +146,6 @@ mod tests {
         assert!(models_match("claude-sonnet-4-6", "claude-sonnet-4.6"));
         assert!(models_match("claude-sonnet-4", "claude-sonnet-4-6"));
         assert!(!models_match("claude-sonnet-4", "claude-opus-4-6"));
-    }
-
-    #[test]
-    fn best_match_prefers_exact() {
-        let available = vec![
-            "claude-sonnet-4-6".into(),
-            "claude-sonnet-4-6-thinking".into(),
-            "claude-sonnet-4".into(),
-        ];
-        assert_eq!(
-            best_match(&available, "claude-sonnet-4-6").as_deref(),
-            Some("claude-sonnet-4-6")
-        );
     }
 
     #[test]

@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { getConfig, saveConfig, testProxy } from "../lib/api";
 import {
-  DEFAULT_MODELS,
   PROVIDER_META,
   PROVIDERS,
   normalizeModels,
@@ -26,9 +25,6 @@ function newSite(): SiteConfig {
     type: "new2api",
     base_url: "",
     vpn: false,
-    token: "",
-    username: "",
-    password: "",
   };
 }
 
@@ -38,6 +34,8 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
   const [error, setError] = useState<string | null>(null);
   const [proxyTip, setProxyTip] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  const models = config ? normalizeModels(config.monitor?.models) : null;
 
   useEffect(() => {
     getConfig()
@@ -73,7 +71,7 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
   };
 
   const handleSave = async () => {
-    if (!config) return;
+    if (!config || !models) return;
     if (mode !== "settings") {
       if (!site || !site.name.trim() || !site.base_url.trim()) {
         setError("请填写名称和地址");
@@ -85,7 +83,7 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
     try {
       const next: AppConfig = {
         ...config,
-        monitor: { models: normalizeModels(config.monitor?.models) },
+        monitor: { models },
         sites:
           mode === "settings"
             ? config.sites
@@ -102,18 +100,10 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
     }
   };
 
-  const patchModels = (provider: ProviderId, models: string[]) => {
+  const patchModels = (provider: ProviderId, next: string[]) => {
     setConfig((prev) =>
       prev
-        ? {
-            ...prev,
-            monitor: {
-              models: {
-                ...normalizeModels(prev.monitor?.models),
-                [provider]: models,
-              },
-            },
-          }
+        ? { ...prev, monitor: { models: { ...prev.monitor.models, [provider]: next } } }
         : prev,
     );
   };
@@ -195,14 +185,7 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
                     onClick={() =>
                       setConfig({
                         ...config,
-                        monitor: {
-                          models: {
-                            gpt: [...DEFAULT_MODELS.gpt],
-                            claude: [...DEFAULT_MODELS.claude],
-                            grok: [...DEFAULT_MODELS.grok],
-                            kimi: [...DEFAULT_MODELS.kimi],
-                          },
-                        },
+                        monitor: { models: normalizeModels(null) },
                       })
                     }
                   >
@@ -217,7 +200,7 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
                     <ModelChips
                       key={id}
                       provider={id}
-                      models={normalizeModels(config.monitor?.models)[id]}
+                      models={models?.[id] ?? []}
                       onChange={(list) => patchModels(id, list)}
                     />
                   ))}

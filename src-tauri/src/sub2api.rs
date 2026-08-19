@@ -1,27 +1,15 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use reqwest::Client;
 use serde_json::Value;
 
-use crate::config::{MonitorModels, SiteConfig};
+use crate::config::SiteConfig;
 use crate::http::truncate;
 use crate::models::{detect_provider, format_channel_detail, sort_by_success_rate, Provider};
-use crate::state::{AppState, ChannelBalance, ChannelStatus, QuotaTier, SiteResult, TokenCache};
-
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+use crate::state::{
+    now_secs, AppState, ChannelBalance, ChannelStatus, QuotaTier, SiteResult, TokenCache,
+};
 
 /// sub2api 站点采集：确保登录态 -> 拉取渠道监控列表
-pub async fn check(
-    client: &Client,
-    site: &SiteConfig,
-    state: &AppState,
-    monitor: &MonitorModels,
-) -> SiteResult {
+pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> SiteResult {
     let token = match ensure_token(client, site, state).await {
         Ok(t) => t,
         Err(e) => return SiteResult::error(site, e),
@@ -58,7 +46,7 @@ pub async fn check(
     let mut result = SiteResult::base(site, true, None);
     let parsed = parse_channels(&value);
     result.balance_usd = site_balance_from_channels(&parsed).or(token.balance);
-    result.channels = apply_monitor(parsed, monitor);
+    result.channels = rank_channels(parsed);
     // 字段结构未最终确定前，保留原始响应片段便于调试
     result.raw = Some(truncate(&body, 2000));
     result
@@ -228,11 +216,10 @@ fn extract_items(value: &Value) -> Vec<Value> {
         return arr.clone();
     }
     for key in ["items", "list", "channels", "monitors", "results"] {
-        if let Some(arr) = data.get(key).and_then(|v| v.as_array()) {
-            return arr.clone();
-        }
-        if let Some(arr) = value.get(key).and_then(|v| v.as_array()) {
-            return arr.clone();
+        for node in [data, value] {
+            if let Some(arr) = node.get(key).and_then(|v| v.as_array()) {
+                return arr.clone();
+            }
         }
     }
     Vec::new()
@@ -295,10 +282,9 @@ fn parse_channel(item: &Value) -> ChannelStatus {
     }
 }
 
-fn apply_monitor(channels: Vec<ChannelStatus>, _monitor: &MonitorModels) -> Vec<ChannelStatus> {
-    let mut ranked = channels;
-    sort_by_success_rate(&mut ranked, |c| c.availability);
-    ranked
+fn rank_channels(mut channels: Vec<ChannelStatus>) -> Vec<ChannelStatus> {
+    sort_by_success_rate(&mut channels, |c| c.availability);
+    channels
 }
 
 fn parse_status(item: &Value) -> (bool, String) {
@@ -538,213 +524,8 @@ mod tests {
         assert!((token.balance.unwrap() + 0.004).abs() < 0.0001);
     }
 
-    /// 登录 AI98 并探测 /monitor 相关接口
-    #[tokio::test]
-    async fn probe_ai98_monitor() {
-        use crate::config::{self, SiteType};
-        use crate::http;
-        use crate::state::AppState;
-
-        let cfg = config::load_config().expect("配置文件应可加载");
-        let site = cfg
-            .sites
-            .iter()
-            .find(|s| s.id == "ai98" && s.site_type == SiteType::Sub2api)
-            .cloned()
-            .expect("应有 ai98 站点");
-        assert!(
-            site.username.as_deref().unwrap_or("").contains('@'),
-            "ai98 应已配置邮箱"
-        );
-
-        let client = http::build_client(if site.vpn {
-            Some(cfg.proxy.url.as_str())
-        } else {
-            None
-        })
-        .unwrap();
-        let state = AppState::default();
-        let result = check(&client, &site, &state, &cfg.monitor.models).await;
-        println!(
-            "[ai98] ok={} channels={} note={:?} error={:?} balance={:?}",
-            result.ok,
-            result.channels.len(),
-            result.note,
-            result.error,
-            result.balance_usd
-        );
-        for ch in result.channels.iter().take(20) {
-            println!(
-                "  - {} | {} | online={} | tiers={} | bal={} | {}",
-                ch.name,
-                ch.status,
-                ch.online,
-                ch.tiers.len(),
-                ch.balances.len(),
-                ch.detail
-            );
-        }
-        if let Some(raw) = &result.raw {
-            println!("raw={}", crate::http::truncate(raw, 800));
-        }
-
-        let login_url = format!("{}/api/v1/auth/login", site.base_url.trim_end_matches('/'));
-        let payload = serde_json::json!({
-            "email": site.username.clone().unwrap_or_default(),
-            "password": site.password.clone().unwrap_or_default()
-        });
-        match client.post(&login_url).json(&payload).send().await {
-            Ok(r) => {
-                let status = r.status();
-                let body = r.text().await.unwrap_or_default();
-                let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-                println!(
-                    "login HTTP {status} top_keys={:?} data_keys={:?}",
-                    value
-                        .as_object()
-                        .map(|o| o.keys().cloned().collect::<Vec<_>>()),
-                    value.get("data").and_then(|d| d.as_object()).map(|o| o
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<_>>())
-                );
-                println!("login body={}", crate::http::truncate(&redact_tokens(&body), 600));
-            }
-            Err(e) => println!("login ERR {e}"),
-        }
-
-        let token = ensure_token(&client, &site, &state).await;
-        if let Ok(token) = token {
-            let base = site.base_url.trim_end_matches('/');
-            for path in [
-                "/api/v1/channel-monitors",
-                "/api/v1/channel-monitor-v2/snapshot",
-                "/api/v1/channel-monitor-v2/matrix?range=24h",
-                "/monitor",
-            ] {
-                let url = format!("{base}{path}");
-                match client.get(&url).bearer_auth(&token.auth_token).send().await {
-                    Ok(r) => {
-                        let status = r.status();
-                        let body = r.text().await.unwrap_or_default();
-                        let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-                        let keys = value
-                            .as_object()
-                            .map(|o| o.keys().cloned().collect::<Vec<_>>())
-                            .unwrap_or_default();
-                        let data = value.get("data").unwrap_or(&value);
-                        let n = match data {
-                            Value::Array(a) => a.len(),
-                            Value::Object(o) => o.len(),
-                            _ => 0,
-                        };
-                        println!("  {status} {path} keys={keys:?} data_len={n}");
-                        if let Some(first) = data.as_array().and_then(|a| a.first()) {
-                            println!(
-                                "    first_keys={:?}",
-                                first
-                                    .as_object()
-                                    .map(|o| o.keys().cloned().collect::<Vec<_>>())
-                            );
-                            println!("    first={}", crate::http::truncate(&first.to_string(), 400));
-                        } else if data.is_object() {
-                            println!("    data={}", crate::http::truncate(&data.to_string(), 400));
-                        } else {
-                            println!("    body={}", crate::http::truncate(body.trim(), 200));
-                        }
-                    }
-                    Err(e) => println!("  ERR {path} {e}"),
-                }
-            }
-        } else {
-            println!("login/token: {token:?}");
-        }
-    }
-
-    fn redact_tokens(s: &str) -> String {
-        let mut out = s.to_string();
-        for key in ["auth_token", "access_token", "token", "refresh_token", "jwt"] {
-            if let Some(i) = out.find(key) {
-                if let Some(colon) = out[i..].find(':') {
-                    let start = i + colon + 1;
-                    if start < out.len() {
-                        let rest = &out[start..];
-                        if let Some(end) = rest.find([',', '}']) {
-                            out.replace_range(start..start + end, "\"***\"");
-                        }
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    #[tokio::test]
-    async fn probe_vpn_sub2api() {
-        use crate::config::{self, SiteType};
-        use crate::http;
-        use crate::state::AppState;
-
-        let cfg = config::load_config().expect("配置应可加载");
-        for site in cfg
-            .sites
-            .iter()
-            .filter(|s| s.site_type == SiteType::Sub2api && s.vpn)
-        {
-            let client = http::build_client(Some(cfg.proxy.url.as_str())).unwrap();
-            let state = AppState::default();
-            let result = check(&client, site, &state, &cfg.monitor.models).await;
-            println!(
-                "[{}] ok={} channels={} err={:?} raw_keys",
-                site.id,
-                result.ok,
-                result.channels.len(),
-                result.error
-            );
-            for ch in result.channels.iter().take(8) {
-                println!("  - {} | {} | {}", ch.name, ch.status, ch.detail);
-            }
-            if let Some(raw) = &result.raw {
-                println!("  raw={}", crate::http::truncate(raw, 500));
-            }
-
-            if let Ok(token) = ensure_token(&client, site, &state).await {
-                let base = site.base_url.trim_end_matches('/');
-                for path in [
-                    "/api/v1/channel-monitors",
-                    "/api/v1/channel-monitor-v2/snapshot?range=24h",
-                    "/api/v1/channel-monitor-v2/matrix?range=24h",
-                    "/api/v1/channel-monitor-v2/dimensions",
-                ] {
-                    match client
-                        .get(format!("{base}{path}"))
-                        .bearer_auth(&token.auth_token)
-                        .send()
-                        .await
-                    {
-                        Ok(r) => {
-                            let status = r.status();
-                            let body = r.text().await.unwrap_or_default();
-                            let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-                            let keys = value
-                                .as_object()
-                                .map(|o| o.keys().cloned().collect::<Vec<_>>())
-                                .unwrap_or_default();
-                            let data = value.get("data").unwrap_or(&value);
-                            println!(
-                                "  {status} {path} keys={keys:?} {}",
-                                crate::http::truncate(&data.to_string(), 280)
-                            );
-                        }
-                        Err(e) => println!("  ERR {path} {e}"),
-                    }
-                }
-            }
-        }
-    }
-
     #[test]
-    fn apply_monitor_keeps_matching_models_and_ranks_by_success() {
+    fn rank_channels_sorts_by_success() {
         let json = serde_json::json!([
             {
                 "name": "slow-claude",
@@ -767,13 +548,7 @@ mod tests {
                 "availability_7d": 100.0
             }
         ]);
-        let monitor = MonitorModels {
-            gpt: vec!["gpt-5.4".into()],
-            claude: vec!["claude-sonnet-4-6".into()],
-            grok: vec![],
-            kimi: vec![],
-        };
-        let channels = apply_monitor(parse_channels(&json), &monitor);
+        let channels = rank_channels(parse_channels(&json));
         assert_eq!(channels.len(), 3);
         assert_eq!(channels[0].model.as_deref(), Some("deepseek-v3"));
         assert_eq!(channels[1].model.as_deref(), Some("gpt-5.4"));

@@ -96,6 +96,22 @@ export default function App() {
     }
   };
 
+  /** 设置弹窗保存后：写入配置；新增/编辑刷新单站，设置项变更刷新全部 */
+  const handleSaved = (cfg: AppConfig, refreshId: string) => {
+    applyConfig(cfg);
+    setDialog(null);
+    if (refreshId === "all") {
+      void handleRefreshAll();
+      return;
+    }
+    setResults((prev) => {
+      const next = { ...prev };
+      delete next[refreshId];
+      return next;
+    });
+    void handleRefreshSite(refreshId);
+  };
+
   const handleRefreshSite = async (id: string) => {
     setRefreshingIds((prev) => new Set(prev).add(id));
     try {
@@ -214,20 +230,7 @@ export default function App() {
           mode={dialog.mode}
           siteId={dialog.mode === "edit" ? dialog.siteId : undefined}
           onClose={() => setDialog(null)}
-          onSaved={(cfg, refreshId) => {
-            applyConfig(cfg);
-            setDialog(null);
-            if (refreshId === "all") {
-              handleRefreshAll();
-              return;
-            }
-            setResults((prev) => {
-              const next = { ...prev };
-              delete next[refreshId];
-              return next;
-            });
-            handleRefreshSite(refreshId);
-          }}
+          onSaved={handleSaved}
         />
       )}
     </div>

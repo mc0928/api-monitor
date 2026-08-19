@@ -67,7 +67,6 @@ export default function SiteCard({
   ).length;
   const degradedCount = channels.filter((c) => c.status === "degraded").length;
   const failedCount = Math.max(0, channels.length - operationalCount - degradedCount);
-  const showBalance = result?.balance_usd != null;
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
@@ -126,16 +125,16 @@ export default function SiteCard({
             {result.note && <p className="text-xs text-amber-600">{result.note}</p>}
 
             {/* 站点余额：new2api 账户余额，或 sub2api 渠道 USD 合计 */}
-            {result.ok && showBalance && (
+            {result.ok && result.balance_usd != null && (
               <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
                 <div>
                   <span className="text-gray-400">余额 </span>
                   <span
                     className={`font-medium ${
-                      (result.balance_usd ?? 0) <= 0 ? "text-red-600" : "text-emerald-600"
+                      result.balance_usd <= 0 ? "text-red-600" : "text-emerald-600"
                     }`}
                   >
-                    ${result.balance_usd?.toFixed(2) ?? "-"}
+                    ${result.balance_usd.toFixed(2)}
                   </span>
                 </div>
               </div>

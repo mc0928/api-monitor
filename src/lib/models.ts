@@ -2,6 +2,21 @@ import type { ChannelStatus, MonitorModels, ProviderId } from "../types";
 
 export const PROVIDERS: ProviderId[] = ["gpt", "claude", "grok", "kimi"];
 
+const PROVIDER_ALIASES: Record<string, ProviderId> = {
+  openai: "gpt",
+  chatgpt: "gpt",
+  anthropic: "claude",
+  xai: "grok",
+  moonshot: "kimi",
+};
+
+const copyModels = (m: MonitorModels): MonitorModels => ({
+  gpt: [...m.gpt],
+  claude: [...m.claude],
+  grok: [...m.grok],
+  kimi: [...m.kimi],
+});
+
 export const DEFAULT_MODELS: MonitorModels = {
   gpt: ["gpt-5.6-sol", "gpt-5.6-terra"],
   claude: ["claude-sonnet-5", "claude-opus-5"],
@@ -20,22 +35,8 @@ export const PROVIDER_META: Record<
 };
 
 export function normalizeModels(models?: MonitorModels | null): MonitorModels {
-  const src = models ?? DEFAULT_MODELS;
-  const next: MonitorModels = {
-    gpt: [...(src.gpt ?? [])],
-    claude: [...(src.claude ?? [])],
-    grok: [...(src.grok ?? [])],
-    kimi: [...(src.kimi ?? [])],
-  };
-  const total = PROVIDERS.reduce((n, id) => n + next[id].length, 0);
-  return total === 0
-    ? {
-        gpt: [...DEFAULT_MODELS.gpt],
-        claude: [...DEFAULT_MODELS.claude],
-        grok: [...DEFAULT_MODELS.grok],
-        kimi: [...DEFAULT_MODELS.kimi],
-      }
-    : next;
+  const next = copyModels(models ?? DEFAULT_MODELS);
+  return PROVIDERS.some((id) => next[id].length > 0) ? next : copyModels(DEFAULT_MODELS);
 }
 
 export function availabilityPct(value: number | null | undefined): number | null {
@@ -71,17 +72,14 @@ export function detectProvider(text: string): ProviderId | null {
 }
 
 export function channelProvider(channel: ChannelStatus): ProviderId | null {
-  if (channel.provider) {
-    const id = channel.provider.toLowerCase();
-    if (id === "gpt" || id === "claude" || id === "grok" || id === "kimi") return id;
-    if (id === "openai" || id === "chatgpt") return "gpt";
-    if (id === "anthropic") return "claude";
-    if (id === "xai") return "grok";
-    if (id === "moonshot") return "kimi";
+  const id = channel.provider?.toLowerCase();
+  if (id) {
+    if (PROVIDERS.includes(id as ProviderId)) return id as ProviderId;
+    return PROVIDER_ALIASES[id] ?? null;
   }
   return (
-    detectProvider(channel.model ?? "") ||
-    detectProvider(channel.name) ||
+    detectProvider(channel.model ?? "") ??
+    detectProvider(channel.name) ??
     detectProvider(channel.detail)
   );
 }

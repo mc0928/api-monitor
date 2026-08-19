@@ -49,7 +49,7 @@ async fn refresh_site(
         .find(|s| s.id == id)
         .cloned()
         .ok_or_else(|| format!("未找到站点: {id}"))?;
-    Ok(refresh_one(&site, &cfg.proxy.url, &cfg.monitor.models, &state).await)
+    Ok(refresh_one_cached(&site, &cfg.proxy.url, None, &cfg.monitor.models, &state).await)
 }
 
 /// 并发刷新全部站点（互不阻塞），按配置顺序返回结果
@@ -117,24 +117,7 @@ async fn test_proxy() -> Result<String, String> {
     ))
 }
 
-/// 单站点刷新：按 vpn 开关选择直连 / 代理客户端，结果写入缓存
-async fn refresh_one(
-    site: &SiteConfig,
-    proxy_url: &str,
-    models: &config::MonitorModels,
-    state: &AppState,
-) -> SiteResult {
-    let proxy = if site.vpn { Some(proxy_url) } else { None };
-    refresh_one_cached(
-        site,
-        proxy_url,
-        http::build_client(proxy).ok(),
-        models,
-        state,
-    )
-    .await
-}
-
+/// 按 vpn 开关选择直连 / 代理客户端（传入 None 时在此构建），结果写入缓存
 async fn refresh_one_cached(
     site: &SiteConfig,
     proxy_url: &str,
@@ -159,7 +142,7 @@ async fn refresh_one_cached(
 
     let result = match site.site_type {
         SiteType::New2api => new2api::check(&client, site, models).await,
-        SiteType::Sub2api => sub2api::check(&client, site, state, models).await,
+        SiteType::Sub2api => sub2api::check(&client, site, state).await,
     };
     state.set_result(result.clone());
     result

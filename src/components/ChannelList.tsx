@@ -31,16 +31,10 @@ function statusDot(channel: ChannelStatus) {
   return "bg-red-500";
 }
 
-function barColor(pct: number) {
-  if (pct >= 90) return "bg-red-500";
-  if (pct >= 75) return "bg-amber-500";
-  return "bg-emerald-500";
-}
-
-function textColor(pct: number) {
-  if (pct >= 90) return "text-red-600";
-  if (pct >= 75) return "text-amber-600";
-  return "text-emerald-600";
+function quotaColor(pct: number) {
+  if (pct >= 90) return { bar: "bg-red-500", text: "text-red-600" };
+  if (pct >= 75) return { bar: "bg-amber-500", text: "text-amber-600" };
+  return { bar: "bg-emerald-500", text: "text-emerald-600" };
 }
 
 function tierLabel(tier: QuotaTier) {
@@ -100,6 +94,7 @@ function QuotaBars({ tiers }: { tiers: QuotaTier[] }) {
     <div className="mt-1.5 space-y-1">
       {tiers.map((tier, index) => {
         const pct = Math.min(100, Math.max(0, tier.used_percent));
+        const color = quotaColor(pct);
         return (
           <div
             key={`${tier.window}-${tier.label ?? ""}-${index}`}
@@ -110,11 +105,11 @@ function QuotaBars({ tiers }: { tiers: QuotaTier[] }) {
             </span>
             <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-200">
               <div
-                className={`h-full rounded-full transition-all ${barColor(pct)}`}
+                className={`h-full rounded-full transition-all ${color.bar}`}
                 style={{ width: `${pct}%` }}
               />
             </div>
-            <span className={`w-8 shrink-0 text-right font-medium ${textColor(pct)}`}>
+            <span className={`w-8 shrink-0 text-right font-medium ${color.text}`}>
               {Math.round(pct)}%
             </span>
             {tier.reset_at && (
@@ -138,6 +133,7 @@ export default function ChannelList({ channels }: Props) {
     <ul className="max-h-72 space-y-1.5 overflow-auto pr-1">
       {channels.map((channel, index) => {
         const provider = channelProvider(channel);
+        const balances = channel.balances ?? [];
         return (
         <li
           key={`${channel.name}-${index}`}
@@ -160,9 +156,9 @@ export default function ChannelList({ channels }: Props) {
             <AvailabilityBar value={channel.availability} />
           )}
           <QuotaBars tiers={channel.tiers ?? []} />
-          {(channel.balances ?? []).length > 0 && (
+          {balances.length > 0 && (
             <div className="mt-1 flex flex-wrap gap-x-2 text-[11px]">
-              {(channel.balances ?? []).map((item) => (
+              {balances.map((item) => (
                 <span
                   key={`${item.currency}-${item.balance}`}
                   className={item.balance <= 0 ? "font-medium text-red-600" : "text-gray-600"}
