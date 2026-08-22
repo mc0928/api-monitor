@@ -19,9 +19,13 @@ fn get_config() -> Result<AppConfig, String> {
 /// 整体保存配置（设置对话框写回 sites.json）
 #[tauri::command]
 fn save_config(cfg: AppConfig, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
     for site in &cfg.sites {
         if site.id.trim().is_empty() {
             return Err("存在未填写 ID 的站点".to_string());
+        }
+        if !seen.insert(site.id.trim().to_string()) {
+            return Err(format!("站点 ID「{}」重复，请更换 ID", site.id));
         }
         if site.base_url.trim().is_empty() || !site.base_url.starts_with("http") {
             return Err(format!("站点「{}」的 URL 无效", site.name));
@@ -58,12 +62,12 @@ async fn refresh_all(state: tauri::State<'_, AppState>) -> Result<Vec<SiteResult
     let cfg = config::load_config()?;
     let inner = state.inner().clone();
 
-    let direct = http::build_client(None).ok();
-    let via_proxy = http::build_client(Some(&cfg.proxy.url)).ok();
+    // 客户端构建失败（如代理地址非法）直接返回明确错误，不再静默降级
+    let direct = http::build_client(None)?;
+    let via_proxy = http::build_client(Some(&cfg.proxy.url))?;
 
     let mut handles = Vec::new();
     for site in cfg.sites {
-        let proxy_url = cfg.proxy.url.clone();
         let app_state = inner.clone();
         let shared = if site.vpn {
             via_proxy.clone()
@@ -71,14 +75,25 @@ async fn refresh_all(state: tauri::State<'_, AppState>) -> Result<Vec<SiteResult
             direct.clone()
         };
         let models = cfg.monitor.models.clone();
-        handles.push(tauri::async_runtime::spawn(async move {
-            refresh_one_cached(&site, &proxy_url, shared, &models, &app_state).await
-        }));
+        handles.push((
+            site.clone(),
+            tauri::async_runtime::spawn(async move {
+                refresh_one_shared(&site, &shared, &models, &app_state).await
+            }),
+        ));
     }
 
+    // 单个任务失败只影响该站点，不影响其余结果
     let mut results = Vec::new();
-    for handle in handles {
-        results.push(handle.await.map_err(|e| e.to_string())?);
+    for (site, handle) in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                let result = SiteResult::error(&site, format!("内部错误: {e}"));
+                state.set_result(result.clone());
+                results.push(result);
+            }
+        }
     }
     Ok(results)
 }
@@ -139,10 +154,19 @@ async fn refresh_one_cached(
             }
         }
     };
+    refresh_one_shared(site, &client, models, state).await
+}
 
+/// 用已构建的客户端检查站点，结果写入缓存
+async fn refresh_one_shared(
+    site: &SiteConfig,
+    client: &reqwest::Client,
+    models: &config::MonitorModels,
+    state: &AppState,
+) -> SiteResult {
     let result = match site.site_type {
-        SiteType::New2api => new2api::check(&client, site, models).await,
-        SiteType::Sub2api => sub2api::check(&client, site, state).await,
+        SiteType::New2api => new2api::check(client, site, models).await,
+        SiteType::Sub2api => sub2api::check(client, site, state).await,
     };
     state.set_result(result.clone());
     result
