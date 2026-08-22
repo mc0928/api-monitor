@@ -380,6 +380,28 @@ fn parse_channel(item: &Value) -> ChannelStatus {
         detail.push_str(r);
     }
 
+    // timeline[]：历史检测记录（新→旧），状态映射为站点自身使用的权重
+    let mut trend: Vec<TrendPoint> = item
+        .get("timeline")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let t = c.get("checked_at")?.as_str()?.to_string();
+                    let v = match c.get("status").and_then(|s| s.as_str())? {
+                        "operational" => 100.0,
+                        "degraded" => 65.0,
+                        "error" | "failed" => 35.0,
+                        "empty" => 15.0,
+                        _ => return None,
+                    };
+                    Some(TrendPoint { t, v })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    trend.reverse();
+
     ChannelStatus {
         name,
         online,
@@ -392,7 +414,7 @@ fn parse_channel(item: &Value) -> ChannelStatus {
         latency_ms,
         tiers,
         balances,
-        trend: None,
+        trend: (trend.len() >= 2).then_some(trend),
     }
 }
 
@@ -668,6 +690,27 @@ mod tests {
         assert_eq!(channels[1].model.as_deref(), Some("gpt-5.4"));
         assert_eq!(channels[2].model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(channels[2].detail, "claude-sonnet-4-6 · 3114ms · 36.5%");
+    }
+
+    #[test]
+    fn parse_timeline_into_trend() {
+        let json = serde_json::json!([{
+            "name": "A",
+            "primary_status": "operational",
+            "timeline": [
+                { "status": "operational", "checked_at": "2026-08-22T08:00:00Z" },
+                { "status": "error", "checked_at": "2026-08-22T07:00:00Z" },
+                { "status": "degraded", "checked_at": "2026-08-22T06:00:00Z" }
+            ]
+        }]);
+        let channels = parse_channels(&json);
+        let trend = channels[0].trend.as_ref().expect("应有趋势");
+        // timeline 新→旧，解析后应翻转为时间升序
+        assert_eq!(trend.len(), 3);
+        assert_eq!(trend[0].t, "2026-08-22T06:00:00Z");
+        assert!((trend[0].v - 65.0).abs() < f64::EPSILON);
+        assert!((trend[1].v - 35.0).abs() < f64::EPSILON);
+        assert!((trend[2].v - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]

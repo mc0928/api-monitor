@@ -9,7 +9,7 @@ use crate::http::truncate;
 use crate::models::{
     detect_provider, format_channel_detail, models_match, sort_by_success_rate, Provider,
 };
-use crate::state::{ChannelStatus, SiteResult};
+use crate::state::{ChannelStatus, SiteResult, TrendPoint};
 
 const PERF_REQ_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -129,6 +129,8 @@ struct GroupPerf {
     latency_ms: i64,
     success_rate: f64,
     model: String,
+    /// 分组的逐时成功率趋势（series，近 24h）
+    trend: Vec<TrendPoint>,
 }
 
 fn summary_models(summary: &Value) -> Vec<String> {
@@ -228,6 +230,24 @@ fn merge_group_perfs(perfs: &mut HashMap<String, GroupPerf>, value: &Value) {
             continue;
         }
         let key = format!("{name}\x1f{model}");
+        // series[]：{ts(unix 秒), success_rate} 逐时桶 → 趋势线
+        let mut trend: Vec<TrendPoint> = item
+            .get("series")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        let ts = p.get("ts")?.as_i64()?;
+                        let rate = p.get("success_rate")?.as_f64()?;
+                        Some(TrendPoint {
+                            t: unix_to_iso(ts),
+                            v: rate.min(100.0),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        trend.sort_by(|a, b| a.t.cmp(&b.t));
         perfs.insert(
             key,
             GroupPerf {
@@ -235,9 +255,28 @@ fn merge_group_perfs(perfs: &mut HashMap<String, GroupPerf>, value: &Value) {
                 latency_ms: pick_number(item, "avg_latency_ms").unwrap_or(0.0) as i64,
                 success_rate: pick_number(item, "success_rate").unwrap_or(0.0),
                 model: model.clone(),
+                trend,
             },
         );
     }
+}
+
+/// Unix 秒 → UTC ISO 时间（series.ts 的 ts 是秒级时间戳）
+fn unix_to_iso(secs: i64) -> String {
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // Howard Hinnant 的 civil_from_days 算法
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
 fn model_preference(group: &str, model: &str, wanted: &[String]) -> (u8, usize) {
@@ -307,7 +346,7 @@ fn parse_plaza_channels(
                 latency_ms,
                 tiers: Vec::new(),
                 balances: Vec::new(),
-                trend: None,
+                trend: (perf.trend.len() >= 2).then(|| perf.trend.clone()),
             }
         })
         .collect();
@@ -359,6 +398,7 @@ mod tests {
                 latency_ms: 13740,
                 success_rate: 99.3,
                 model: "gpt-5.6-sol".into(),
+                trend: Vec::new(),
             },
         );
         perfs.insert(
@@ -368,6 +408,7 @@ mod tests {
                 latency_ms: 16111,
                 success_rate: 92.2,
                 model: "grok-4.6".into(),
+                trend: Vec::new(),
             },
         );
         let channels = parse_plaza_channels(&perfs, &MonitorModels::default());
@@ -420,7 +461,12 @@ mod tests {
                         "avg_ttft_ms": 3430,
                         "avg_latency_ms": 13220,
                         "success_rate": 99.1,
-                        "avg_tps": 52.4
+                        "avg_tps": 52.4,
+                        "series": [
+                            { "ts": 1787302800, "success_rate": 98.5 },
+                            { "ts": 1787306400, "success_rate": 99.9 },
+                            { "ts": 1787310000, "success_rate": 100.0 }
+                        ]
                     }
                 ]
             }
@@ -430,5 +476,8 @@ mod tests {
         let vip = perfs.values().find(|p| p.group == "vip").unwrap();
         assert!((vip.success_rate - 99.1).abs() < f64::EPSILON);
         assert_eq!(vip.model, "gpt-5.6-sol");
+        assert_eq!(vip.trend.len(), 3);
+        assert_eq!(vip.trend[0].t, "2026-08-21T09:00:00Z");
+        assert!((vip.trend[2].v - 100.0).abs() < f64::EPSILON);
     }
 }

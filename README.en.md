@@ -18,7 +18,7 @@ Frontend: Tauri 2 + React 18 + TypeScript + Tailwind CSS. Backend: Rust / reqwes
 - **Notifications**: system notifications when a site starts failing, recovers, or a channel goes down — works together with background tray mode
 - **Single instance**: launching again focuses the existing window instead of opening a duplicate
 - **Tray tooltip summary**: hover the tray icon to see "N OK · M failed · total balance"
-- **Success-rate sparklines**: sites with V2 passive monitoring (e.g. Kedaya) show a 24-hour hourly trend line
+- **Success-rate sparklines**: every site shows a 24-hour success-rate trend (auto-adapts to new2api series / sub2api timeline / V2 buckets)
 - **Update check**: checks the latest GitHub release on startup and shows a banner when a new version is available
 - **Close to tray**: closing the window minimizes the app to the system tray and keeps monitoring; the tray menu can show the window or quit
 - **Snapshot persistence**: results are saved to disk and restored on launch, so the UI is populated instantly after a restart
