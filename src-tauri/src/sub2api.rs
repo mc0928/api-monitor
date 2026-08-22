@@ -10,15 +10,13 @@ use crate::state::{
 
 /// sub2api 站点采集：确保登录态 -> 拉取渠道监控列表；401 时清缓存重登一次
 pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> SiteResult {
-    let token = match ensure_token(client, site, state).await {
+    let mut token = match ensure_token(client, site, state).await {
         Ok(t) => t,
         Err(e) => return SiteResult::error(site, e),
     };
 
-    let url = format!(
-        "{}/api/v1/channel-monitors",
-        site.base_url.trim_end_matches('/')
-    );
+    let base = site.base_url.trim_end_matches('/');
+    let url = format!("{base}/api/v1/channel-monitors");
 
     let (status, body) = match fetch_monitors(client, &url, &token.auth_token).await {
         Ok(r) => r,
@@ -28,7 +26,7 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
     // 401：令牌失效，清除缓存重新登录后再取一次
     let (status, body) = if status == 401 {
         state.clear_token(&site.id);
-        let token = match ensure_token(client, site, state).await {
+        token = match ensure_token(client, site, state).await {
             Ok(t) => t,
             Err(e) => return SiteResult::error(site, e),
         };
@@ -60,6 +58,14 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
     let parsed = parse_channels(&value);
     result.balance_usd = site_balance_from_channels(&parsed).or(token.balance);
     result.channels = rank_channels(parsed);
+    // 渠道监控列表为空时，回退到 V2 被动监控（部分站点数据只在此接口）
+    if result.channels.is_empty() {
+        if let Ok(v2) = fetch_v2_matrix(client, base, &token.auth_token).await {
+            if !v2.is_empty() {
+                result.channels = rank_channels(v2);
+            }
+        }
+    }
     if result.channels.is_empty() {
         // 站点正常响应但列表为空：通常该账号在网站上还没配置渠道监控
         result.note = Some("站点未返回渠道监控，请确认已在网站上添加".to_string());
@@ -67,6 +73,78 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
     // 字段结构未最终确定前，保留原始响应片段便于调试（调试开关关闭时由 lib.rs 剥离）
     result.raw = Some(truncate(&body, 2000));
     result
+}
+
+/// V2 被动监控：按分组聚合的成功率/错误率/首 Token 延迟
+/// GET /api/v1/channel-monitor-v2/matrix?range=24h
+async fn fetch_v2_matrix(
+    client: &Client,
+    base: &str,
+    token: &str,
+) -> Result<Vec<ChannelStatus>, String> {
+    let url = format!("{base}/api/v1/channel-monitor-v2/matrix?range=24h");
+    let (status, body) = crate::http::authorized_get(client, &url, Some(token), None, None, 1)
+        .await
+        .map_err(|e| format!("V2 监控请求失败: {e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP {status}"));
+    }
+    let value: Value = serde_json::from_str(&body)
+        .map_err(|e| format!("V2 监控响应不是合法 JSON: {e}"))?;
+    Ok(parse_v2_matrix(&value))
+}
+
+/// 解析 V2 matrix：data.items[] = { platform, group_name, metrics{success_rate,ttft}, health{overall} }
+fn parse_v2_matrix(value: &Value) -> Vec<ChannelStatus> {
+    let Some(items) = value.pointer("/data/items").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|item| {
+            let name = item
+                .get("group_name")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("未知分组")
+                .to_string();
+            let platform = item.get("platform").and_then(|v| v.as_str()).unwrap_or("");
+            // health.overall: healthy / warning / critical
+            let overall = item
+                .pointer("/health/overall")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let (online, status) = match overall {
+                "healthy" => (true, "operational"),
+                "warning" => (true, "degraded"),
+                "critical" => (false, "failed"),
+                _ => (false, "unknown"),
+            };
+            // success_rate 为 0~1 比率，p50_ms 为首 Token 中位延迟
+            let availability = item
+                .pointer("/metrics/success_rate")
+                .and_then(|v| v.as_f64());
+            let latency_ms = item
+                .pointer("/metrics/ttft/p50_ms")
+                .and_then(|v| v.as_f64())
+                .map(|v| v as i64);
+            ChannelStatus {
+                name,
+                online,
+                detail: format_channel_detail("", latency_ms, availability),
+                status: status.into(),
+                plan_level: None,
+                provider: Provider::from_id(platform)
+                    .map(Provider::id)
+                    .map(str::to_string),
+                model: None,
+                availability,
+                latency_ms,
+                tiers: Vec::new(),
+                balances: Vec::new(),
+            }
+        })
+        .collect()
 }
 
 /// 拉取渠道监控列表（共用 GET，带一次传输层重试）
@@ -594,5 +672,50 @@ mod tests {
         let channels = parse_channels(&json);
         assert_eq!(channels[0].balances.len(), 2);
         assert_eq!(site_balance_from_channels(&channels), Some(1.1));
+    }
+
+    #[test]
+    fn parse_v2_matrix_items() {
+        let json = serde_json::json!({
+            "code": 0,
+            "data": {
+                "group_by": "platform_group",
+                "items": [
+                    {
+                        "platform": "anthropic",
+                        "group_id": 11,
+                        "group_name": "kiro",
+                        "metrics": {
+                            "success_rate": 0.040,
+                            "ttft": { "p50_ms": null, "sample_count": 0 }
+                        },
+                        "health": { "overall": "critical", "score": 33.0 }
+                    },
+                    {
+                        "platform": "openai",
+                        "group_id": 12,
+                        "group_name": "GPT 稳定分组",
+                        "metrics": {
+                            "success_rate": 0.248,
+                            "ttft": { "p50_ms": 10000 }
+                        },
+                        "health": { "overall": "warning", "score": 51.9 }
+                    }
+                ]
+            }
+        });
+        let channels = parse_v2_matrix(&json);
+        assert_eq!(channels.len(), 2);
+        let kiro = channels.iter().find(|c| c.name == "kiro").unwrap();
+        assert!(!kiro.online);
+        assert_eq!(kiro.status, "failed");
+        assert_eq!(kiro.provider.as_deref(), Some("claude"));
+        assert!((kiro.availability.unwrap() - 0.04).abs() < 1e-9);
+        let gpt = channels.iter().find(|c| c.name == "GPT 稳定分组").unwrap();
+        assert!(gpt.online);
+        assert_eq!(gpt.status, "degraded");
+        assert_eq!(gpt.provider.as_deref(), Some("gpt"));
+        assert_eq!(gpt.latency_ms, Some(10000));
+        assert_eq!(gpt.detail, "10000ms · 24.8%");
     }
 }
