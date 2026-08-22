@@ -1,0 +1,37 @@
+{
+  "proxy": {
+    "url": "http://127.0.0.1:7897"
+  },
+  "monitor": {
+    "models": {
+      "gpt": ["gpt-5.6-sol", "gpt-5.6-terra"],
+      "claude": ["claude-sonnet-5", "claude-opus-5"],
+      "grok": ["grok-4.6"],
+      "kimi": ["kimi-k3"]
+    }
+  },
+  "refresh": {
+    "interval_minutes": 5
+  },
+  "debug": false,
+  "sites": [
+    {
+      "id": "site-xxx",
+      "name": "示例 new2api",
+      "type": "new2api",
+      "base_url": "https://example.com",
+      "vpn": false,
+      "token": "sk-xxx",
+      "user_id": "1"
+    },
+    {
+      "id": "site-yyy",
+      "name": "示例 sub2api",
+      "type": "sub2api",
+      "base_url": "https://example.com",
+      "vpn": true,
+      "username": "you@example.com",
+      "password": "your-password"
+    }
+  ]
+}

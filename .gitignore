@@ -1,7 +1,8 @@
 node_modules
 dist
 src-tauri/target
-# 运行时配置（含令牌/密码等敏感信息）
-config/
+# 运行时配置（含令牌/密码等敏感信息）；示例模板除外
+config/*
+!config/sites.example.json
 # 本地工具（如便携版 gh CLI）
 .tools/
