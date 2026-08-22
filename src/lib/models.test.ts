@@ -26,11 +26,12 @@ function channel(patch: Partial<ChannelStatus>): ChannelStatus {
 }
 
 describe("detectProvider", () => {
-  it("识别四个模型族", () => {
+  it("识别五个模型族", () => {
     expect(detectProvider("gpt-5.6-sol")).toBe("gpt");
     expect(detectProvider("anthropic/claude-sonnet-4.6")).toBe("claude");
     expect(detectProvider("grok-4.6")).toBe("grok");
     expect(detectProvider("kimi-k3")).toBe("kimi");
+    expect(detectProvider("gemini-2.5-pro")).toBe("gemini");
   });
 
   it("识别厂商别名与系列词", () => {
@@ -40,6 +41,7 @@ describe("detectProvider", () => {
     expect(detectProvider("claude-opus-5")).toBe("claude");
     expect(detectProvider("xai")).toBe("grok");
     expect(detectProvider("moonshot")).toBe("kimi");
+    expect(detectProvider("google")).toBe("gemini");
   });
 
   it("o 系列按 GPT 归类", () => {
@@ -78,6 +80,7 @@ describe("channelProvider", () => {
     expect(channelProvider(channel({ provider: "anthropic" }))).toBe("claude");
     expect(channelProvider(channel({ provider: "xai" }))).toBe("grok");
     expect(channelProvider(channel({ provider: "moonshot" }))).toBe("kimi");
+    expect(channelProvider(channel({ provider: "google" }))).toBe("gemini");
   });
 
   it("无 provider 时按 model -> name -> detail 回退", () => {
@@ -119,13 +122,26 @@ describe("bestAvailability", () => {
 
 describe("normalizeModels", () => {
   it("全空回退默认配置", () => {
-    const next = normalizeModels({ gpt: [], claude: [], grok: [], kimi: [] });
+    const next = normalizeModels({
+      gpt: [],
+      claude: [],
+      grok: [],
+      kimi: [],
+      gemini: [],
+    });
     expect(next).toEqual(DEFAULT_MODELS);
   });
 
   it("非空配置整体保留（不回退默认）", () => {
-    const next = normalizeModels({ gpt: ["gpt-x"], claude: [], grok: [], kimi: [] });
+    const next = normalizeModels({
+      gpt: ["gpt-x"],
+      claude: [],
+      grok: [],
+      kimi: [],
+      gemini: [],
+    });
     expect(next.gpt).toEqual(["gpt-x"]);
     expect(next.claude).toEqual([]);
+    expect(next.gemini).toEqual([]);
   });
 });

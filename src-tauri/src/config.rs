@@ -77,6 +77,8 @@ pub struct MonitorModels {
     pub grok: Vec<String>,
     #[serde(default)]
     pub kimi: Vec<String>,
+    #[serde(default)]
+    pub gemini: Vec<String>,
 }
 
 impl Default for MonitorModels {
@@ -86,20 +88,32 @@ impl Default for MonitorModels {
             claude: vec!["claude-sonnet-5".into(), "claude-opus-5".into()],
             grok: vec!["grok-4.6".into()],
             kimi: vec!["kimi-k3".into()],
+            gemini: vec!["gemini-2.5-pro".into(), "gemini-2.5-flash".into()],
         }
     }
 }
 
 impl MonitorModels {
     fn is_empty(&self) -> bool {
-        self.gpt.is_empty() && self.claude.is_empty() && self.grok.is_empty() && self.kimi.is_empty()
+        self.gpt.is_empty()
+            && self.claude.is_empty()
+            && self.grok.is_empty()
+            && self.kimi.is_empty()
+            && self.gemini.is_empty()
     }
 
     /// 全部配置模型名（去重、去空白）；全空时回退默认
     pub fn all_names(&self) -> Vec<String> {
         let src = if self.is_empty() { Self::default() } else { self.clone() };
         let mut names: Vec<String> = Vec::new();
-        for name in src.gpt.iter().chain(&src.claude).chain(&src.grok).chain(&src.kimi) {
+        for name in src
+            .gpt
+            .iter()
+            .chain(&src.claude)
+            .chain(&src.grok)
+            .chain(&src.kimi)
+            .chain(&src.gemini)
+        {
             let trimmed = name.trim();
             if !trimmed.is_empty() && !names.iter().any(|n| n == trimmed) {
                 names.push(trimmed.to_string());

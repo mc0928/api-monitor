@@ -16,13 +16,14 @@ export interface SiteConfig {
   password?: string | null;
 }
 
-export type ProviderId = "gpt" | "claude" | "grok" | "kimi";
+export type ProviderId = "gpt" | "claude" | "grok" | "kimi" | "gemini";
 
 export interface MonitorModels {
   gpt: string[];
   claude: string[];
   grok: string[];
   kimi: string[];
+  gemini: string[];
 }
 
 export interface MonitorConfig {

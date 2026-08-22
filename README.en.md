@@ -11,7 +11,7 @@ Frontend: Tauri 2 + React 18 + TypeScript + Tailwind CSS. Backend: Rust / reqwes
 - **new2api sites**: query account balance and cumulative request count with a personal access token; pull model-plaza group performance (success rate / latency)
 - **sub2api sites**: log in with email & password and pull the channel monitor list (status, 7-day success rate, usage quota, balance)
 - **Unified dashboard**: summarizes operational / failed / unchecked counts per site, ranked by success rate by default
-- **Filter by model family**: one-click filtering of channels by GPT / Claude / Grok / Kimi
+- **Filter by model family**: one-click filtering of channels by GPT / Claude / Grok / Kimi / Gemini
 - **Proxy support**: a global Clash mixed-proxy address (with a one-click connectivity test); each site can individually opt in to routing through the proxy
 - **Custom monitored models**: new2api groups preferentially show performance data for models matching your configuration
 - **Auto refresh**: polling at Off / 5 / 10 / 30 minute intervals (default 5 minutes)
@@ -71,7 +71,8 @@ The config file is `config/sites.json`, created automatically the first time you
       "gpt": ["gpt-5.6-sol", "gpt-5.6-terra"],
       "claude": ["claude-sonnet-5", "claude-opus-5"],
       "grok": ["grok-4.6"],
-      "kimi": ["kimi-k3"]
+      "kimi": ["kimi-k3"],
+      "gemini": ["gemini-2.5-pro", "gemini-2.5-flash"]
     }
   },
   "refresh": { "interval_minutes": 5 },

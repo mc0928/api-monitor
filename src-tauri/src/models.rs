@@ -1,10 +1,11 @@
-/// 统一监控的模型族：GPT / Claude / Grok / Kimi
+/// 统一监控的模型族：GPT / Claude / Grok / Kimi / Gemini
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     Gpt,
     Claude,
     Grok,
     Kimi,
+    Gemini,
 }
 
 impl Provider {
@@ -14,6 +15,7 @@ impl Provider {
             Self::Claude => "claude",
             Self::Grok => "grok",
             Self::Kimi => "kimi",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -23,6 +25,7 @@ impl Provider {
             "claude" | "anthropic" => Some(Self::Claude),
             "grok" | "xai" => Some(Self::Grok),
             "kimi" | "moonshot" => Some(Self::Kimi),
+            "gemini" | "google" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -72,6 +75,9 @@ pub fn detect_provider(text: &str) -> Option<Provider> {
     }
     if n.contains("kimi") || n.contains("moonshot") {
         return Some(Provider::Kimi);
+    }
+    if n.contains("gemini") || raw.contains("google") {
+        return Some(Provider::Gemini);
     }
     if n.contains("gpt")
         || n.contains("chatgpt")
@@ -155,6 +161,9 @@ mod tests {
         assert_eq!(detect_provider("grok-4.6"), Some(Provider::Grok));
         assert_eq!(detect_provider("kimi-k2.5"), Some(Provider::Kimi));
         assert_eq!(detect_provider("anthropic"), Some(Provider::Claude));
+        assert_eq!(detect_provider("gemini-2.5-pro"), Some(Provider::Gemini));
+        assert_eq!(detect_provider("google"), Some(Provider::Gemini));
+        assert_eq!(Provider::from_id("google"), Some(Provider::Gemini));
     }
 
     #[test]

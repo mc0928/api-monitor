@@ -1,6 +1,6 @@
 import type { ChannelStatus, MonitorModels, ProviderId } from "../types";
 
-export const PROVIDERS: ProviderId[] = ["gpt", "claude", "grok", "kimi"];
+export const PROVIDERS: ProviderId[] = ["gpt", "claude", "grok", "kimi", "gemini"];
 
 const PROVIDER_ALIASES: Record<string, ProviderId> = {
   openai: "gpt",
@@ -8,6 +8,7 @@ const PROVIDER_ALIASES: Record<string, ProviderId> = {
   anthropic: "claude",
   xai: "grok",
   moonshot: "kimi",
+  google: "gemini",
 };
 
 const copyModels = (m: MonitorModels): MonitorModels => ({
@@ -15,6 +16,7 @@ const copyModels = (m: MonitorModels): MonitorModels => ({
   claude: [...m.claude],
   grok: [...m.grok],
   kimi: [...m.kimi],
+  gemini: [...m.gemini],
 });
 
 export const DEFAULT_MODELS: MonitorModels = {
@@ -22,6 +24,7 @@ export const DEFAULT_MODELS: MonitorModels = {
   claude: ["claude-sonnet-5", "claude-opus-5"],
   grok: ["grok-4.6"],
   kimi: ["kimi-k3"],
+  gemini: ["gemini-2.5-pro", "gemini-2.5-flash"],
 };
 
 export const PROVIDER_META: Record<
@@ -32,6 +35,7 @@ export const PROVIDER_META: Record<
   claude: { label: "Claude", vendor: "anthropic", color: "#d97757" },
   grok: { label: "Grok", vendor: "xai", color: "#111827" },
   kimi: { label: "Kimi", vendor: "moonshot", color: "#3b82f6" },
+  gemini: { label: "Gemini", vendor: "google", color: "#8b5cf6" },
 };
 
 export function normalizeModels(models?: MonitorModels | null): MonitorModels {
@@ -60,6 +64,7 @@ export function detectProvider(text: string): ProviderId | null {
   }
   if (n.includes("grok") || raw.includes("xai")) return "grok";
   if (n.includes("kimi") || n.includes("moonshot")) return "kimi";
+  if (n.includes("gemini") || raw.includes("google")) return "gemini";
   if (
     n.includes("gpt") ||
     n.includes("chatgpt") ||

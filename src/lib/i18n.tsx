@@ -60,7 +60,7 @@ const zh: Record<string, string> = {
   "dialog.testing": "测试中…",
   "dialog.monitoredModels": "监控模型",
   "dialog.resetDefaults": "恢复默认",
-  "dialog.modelsHint": "列表展示渠道状态；筛选和 new2api 成功率优先按这些模型归类",
+  "dialog.modelsHint": "列表展示渠道状态",
   "dialog.channel": "渠道",
   "dialog.name": "名称",
   "dialog.typeNew2api": "new2api（令牌查余额）",
@@ -142,8 +142,7 @@ const en: Record<string, string> = {
   "dialog.testing": "Testing…",
   "dialog.monitoredModels": "Monitored models",
   "dialog.resetDefaults": "Reset to defaults",
-  "dialog.modelsHint":
-    "Shown as channel status; filtering and new2api success rates prefer these models",
+  "dialog.modelsHint": "Shown as channel status",
   "dialog.channel": "Site",
   "dialog.name": "Name",
   "dialog.typeNew2api": "new2api (token balance)",

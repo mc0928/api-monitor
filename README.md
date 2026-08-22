@@ -11,7 +11,7 @@
 - **new2api 站点**：个人访问令牌查询账户余额、累计请求数，拉取模型广场分组性能（成功率 / 延迟）
 - **sub2api 站点**：账号密码登录，拉取渠道监控列表（状态、7 天成功率、用量配额、余额）
 - **统一面板**：汇总各站点正常 / 异常 / 未检查数量，默认按成功率排名
-- **按模型族筛选**：GPT / Claude / Grok / Kimi 一键过滤渠道
+- **按模型族筛选**：GPT / Claude / Grok / Kimi / Gemini 一键过滤渠道
 - **代理支持**：全局 Clash 混合代理地址（可一键测试连通性）；单个站点可勾选「走代理」
 - **监控模型自定义**：new2api 分组优先展示匹配配置模型的性能数据
 - **自动刷新**：可选 关闭 / 5 / 10 / 30 分钟间隔轮询（默认 5 分钟）
@@ -71,7 +71,8 @@ cargo test            # 后端解析逻辑单元测试（src-tauri 目录下）
       "gpt": ["gpt-5.6-sol", "gpt-5.6-terra"],
       "claude": ["claude-sonnet-5", "claude-opus-5"],
       "grok": ["grok-4.6"],
-      "kimi": ["kimi-k3"]
+      "kimi": ["kimi-k3"],
+      "gemini": ["gemini-2.5-pro", "gemini-2.5-flash"]
     }
   },
   "refresh": { "interval_minutes": 5 },
