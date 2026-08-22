@@ -62,6 +62,7 @@ async fn refresh_site(
     if let Err(e) = persist::save(&state.results_map()) {
         eprintln!("持久化结果失败: {e}");
     }
+    update_tray_tooltip(&state);
     Ok(result)
 }
 
@@ -109,6 +110,7 @@ async fn refresh_all(state: tauri::State<'_, AppState>) -> Result<Vec<SiteResult
     if let Err(e) = persist::save(&state.results_map()) {
         eprintln!("持久化结果失败: {e}");
     }
+    update_tray_tooltip(&state);
     Ok(results)
 }
 
@@ -200,11 +202,100 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// 用当前结果汇总刷新托盘悬停提示：N 正常 · M 异常 · 余额合计
+fn update_tray_tooltip(state: &AppState) {
+    let Some(app) = state.app_handle.get() else {
+        return;
+    };
+    let Some(tray) = app.tray_by_id("main-tray") else {
+        return;
+    };
+    let map = state.results_map();
+    let sites = config::load_config().map(|c| c.sites).unwrap_or_default();
+    let checked = sites
+        .iter()
+        .filter(|s| map.get(&s.id).is_some_and(|r| r.checked_at > 0))
+        .count();
+    let ok = sites
+        .iter()
+        .filter(|s| map.get(&s.id).is_some_and(|r| r.ok))
+        .count();
+    let fail = checked - ok;
+    let balance: f64 = sites
+        .iter()
+        .filter_map(|s| map.get(&s.id))
+        .filter_map(|r| r.balance_usd)
+        .sum();
+    let tip: String = format!("API Monitor · {ok} 正常 · {fail} 异常 · 余额 ${balance:.2}");
+    let _ = tray.set_tooltip(Some(tip));
+}
+
+/// 检查 GitHub 最新发布版本；比当前新则返回 tag 名
+#[tauri::command]
+async fn check_update() -> Result<Option<String>, String> {
+    const REPO: &str = "mc0928/api-monitor";
+    let cfg = config::load_config()?;
+    let client = if cfg.proxy.url.trim().is_empty() {
+        http::build_client(None)?
+    } else {
+        http::build_client(Some(&cfg.proxy.url))?
+    };
+    let response = client
+        .get(format!("https://api.github.com/repos/{REPO}/releases/latest"))
+        .header("User-Agent", "api-monitor")
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+        .map_err(|e| format!("检查更新失败: {e}"))?;
+    // 无发布/限流等一律视为"无更新"，不打扰用户
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let body = response.text().await.unwrap_or_default();
+    let tag = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.get("tag_name")
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        });
+    Ok(tag.filter(|t| version_newer(t, env!("CARGO_PKG_VERSION"))))
+}
+
+/// 比较版本号（形如 v0.2.1 与 0.2.0）：tag 是否比 current 新
+fn version_newer(tag: &str, current: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.trim_start_matches(['v', 'V'])
+            .split(['.', '-', '+'])
+            .map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+            .filter(|p| !p.is_empty())
+            .filter_map(|p| p.parse().ok())
+            .collect()
+    };
+    let (a, b) = (parse(tag), parse(current));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = AppState::with_persisted();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        // 单实例：再次启动时聚焦已有主窗口
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -212,11 +303,19 @@ pub fn run() {
             refresh_site,
             refresh_all,
             get_results,
-            test_proxy
+            test_proxy,
+            check_update
         ])
         .setup(|app| {
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+            // 记录 AppHandle 供托盘摘要更新使用；并立即用持久化结果刷新一次 tooltip
+            let _ = app
+                .state::<AppState>()
+                .app_handle
+                .set(app.handle().clone());
+            update_tray_tooltip(app.state::<AppState>().inner());
 
             // 托盘菜单：显示主窗口 / 退出
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;

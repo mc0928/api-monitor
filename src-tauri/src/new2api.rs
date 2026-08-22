@@ -307,6 +307,7 @@ fn parse_plaza_channels(
                 latency_ms,
                 tiers: Vec::new(),
                 balances: Vec::new(),
+                trend: None,
             }
         })
         .collect();

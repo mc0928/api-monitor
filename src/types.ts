@@ -61,6 +61,12 @@ export interface ChannelBalance {
   balance: number;
 }
 
+/** 趋势线上的一个点：t 为时间标签，v 为成功率百分数（0~100） */
+export interface TrendPoint {
+  t: string;
+  v: number;
+}
+
 export interface ChannelStatus {
   name: string;
   online: boolean;
@@ -68,13 +74,15 @@ export interface ChannelStatus {
   /** operational | degraded | failed | unknown */
   status: string;
   plan_level: string | null;
-  /** gpt | claude | grok | kimi */
+  /** gpt | claude | grok | kimi | gemini */
   provider?: string | null;
   model?: string | null;
   availability: number | null;
   latency_ms: number | null;
   tiers: QuotaTier[];
   balances: ChannelBalance[];
+  /** 成功率趋势（V2 被动监控逐时桶） */
+  trend?: TrendPoint[] | null;
 }
 
 export interface SiteResult {

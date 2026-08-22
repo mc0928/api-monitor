@@ -1,6 +1,6 @@
 import { channelProvider } from "../lib/models";
 import { useI18n } from "../lib/i18n";
-import type { ChannelBalance, ChannelStatus, QuotaTier } from "../types";
+import type { ChannelBalance, ChannelStatus, QuotaTier, TrendPoint } from "../types";
 import { ProviderIcon } from "./ProviderIcons";
 
 interface Props {
@@ -44,7 +44,42 @@ function formatBalance(item: ChannelBalance) {
   return `${amount} ${currency}`;
 }
 
-function AvailabilityBar({ value }: { value: number }) {
+/** 成功率迷你趋势线：V2 被动监控的逐时桶数据（近 24h） */
+function Sparkline({ points }: { points: TrendPoint[] }) {
+  const vs = points.map((p) => Math.min(100, Math.max(0, p.v)));
+  const w = 92;
+  const h = 24;
+  const pad = 2;
+  const min = Math.min(...vs);
+  const max = Math.max(...vs);
+  const x = (i: number) => pad + (i / (vs.length - 1)) * (w - 2 * pad);
+  const y = (v: number) => h - pad - ((v - min) / (max - min || 1)) * (h - 2 * pad);
+  const d = vs
+    .map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`)
+    .join(" ");
+  const last = vs[vs.length - 1];
+  const stroke = last >= 95 ? "#10b981" : last >= 80 ? "#f59e0b" : "#ef4444";
+  const first = points[0];
+  const lastP = points[points.length - 1];
+  const hhmm = (iso: string) => (iso.length >= 16 ? iso.slice(11, 16) : iso);
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="shrink-0" aria-hidden>
+      <title>
+        {hhmm(first.t)} → {hhmm(lastP.t)} · {Math.round(first.v)}% → {Math.round(last)}%
+      </title>
+      <path
+        d={d}
+        fill="none"
+        stroke={stroke}
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function AvailabilityBar({ value, trend }: { value: number; trend?: TrendPoint[] | null }) {
   const { t } = useI18n();
   const pct = Math.min(100, Math.max(0, value <= 1 ? value * 100 : value));
   const color = availColor(pct);
@@ -62,6 +97,7 @@ function AvailabilityBar({ value }: { value: number }) {
       <span className={`w-8 shrink-0 text-right font-medium ${color.text}`}>
         {Math.round(pct)}%
       </span>
+      {trend && trend.length >= 2 && <Sparkline points={trend} />}
     </div>
   );
 }
@@ -146,7 +182,9 @@ export default function ChannelList({ channels }: Props) {
             {channel.detail && (
               <p className="mt-0.5 pl-4 text-xs leading-5 text-gray-400">{channel.detail}</p>
             )}
-            {channel.availability != null && <AvailabilityBar value={channel.availability} />}
+            {channel.availability != null && (
+              <AvailabilityBar value={channel.availability} trend={channel.trend} />
+            )}
             <QuotaBars tiers={channel.tiers ?? []} />
             {balances.length > 0 && (
               <div className="mt-1 flex flex-wrap gap-x-2 text-[11px]">

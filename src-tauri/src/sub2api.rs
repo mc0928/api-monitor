@@ -6,6 +6,7 @@ use crate::http::truncate;
 use crate::models::{detect_provider, format_channel_detail, sort_by_success_rate, Provider};
 use crate::state::{
     now_secs, AppState, ChannelBalance, ChannelStatus, QuotaTier, SiteResult, TokenCache,
+    TrendPoint,
 };
 
 /// sub2api 站点采集：确保登录态 -> 拉取渠道监控列表；401 时清缓存重登一次
@@ -128,6 +129,17 @@ fn parse_v2_matrix(value: &Value) -> Vec<ChannelStatus> {
                 .pointer("/metrics/ttft/p50_ms")
                 .and_then(|v| v.as_f64())
                 .map(|v| v as i64);
+            // buckets：24 个逐时桶，转成趋势线点（成功率百分数）
+            let trend = item.get("buckets").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|b| {
+                        let t = b.get("bucket_start")?.as_str()?.to_string();
+                        let v = b.pointer("/metrics/success_rate")?.as_f64()? * 100.0;
+                        Some(TrendPoint { t, v })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let trend = trend.filter(|t| t.len() >= 2);
             ChannelStatus {
                 name,
                 online,
@@ -142,6 +154,7 @@ fn parse_v2_matrix(value: &Value) -> Vec<ChannelStatus> {
                 latency_ms,
                 tiers: Vec::new(),
                 balances: Vec::new(),
+                trend,
             }
         })
         .collect()
@@ -379,6 +392,7 @@ fn parse_channel(item: &Value) -> ChannelStatus {
         latency_ms,
         tiers,
         balances,
+        trend: None,
     }
 }
 

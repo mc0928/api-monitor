@@ -12,3 +12,6 @@ export const refreshAll = () => invoke<SiteResult[]>("refresh_all");
 export const getResults = () => invoke<SiteResult[]>("get_results");
 
 export const testProxy = () => invoke<string>("test_proxy");
+
+/** 有新版本时返回 tag 名（如 v0.3.0），否则 null */
+export const checkUpdate = () => invoke<string | null>("check_update");

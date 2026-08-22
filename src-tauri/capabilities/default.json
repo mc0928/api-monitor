@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "默认权限",
   "windows": ["main"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "opener:allow-open-url"
+  ]
 }

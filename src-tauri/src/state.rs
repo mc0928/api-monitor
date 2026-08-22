@@ -23,6 +23,13 @@ pub struct ChannelBalance {
     pub balance: f64,
 }
 
+/// 趋势线上的一个点：t 为时间标签（bucket 起始 ISO 时间），v 为成功率百分数（0~100）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrendPoint {
+    pub t: String,
+    pub v: f64,
+}
+
 /// 单个渠道的状态（new2api / sub2api 站点通用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelStatus {
@@ -32,7 +39,7 @@ pub struct ChannelStatus {
     /// operational | degraded | failed | unknown
     pub status: String,
     pub plan_level: Option<String>,
-    /// gpt | claude | grok | kimi
+    /// gpt | claude | grok | kimi | gemini
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// 统一后的模型名，如 claude-sonnet-4-6
@@ -42,6 +49,9 @@ pub struct ChannelStatus {
     pub latency_ms: Option<i64>,
     pub tiers: Vec<QuotaTier>,
     pub balances: Vec<ChannelBalance>,
+    /// 成功率趋势（V2 被动监控的逐时桶数据）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trend: Option<Vec<TrendPoint>>,
 }
 
 /// 单个站点最近一次检查结果
@@ -114,11 +124,13 @@ pub struct TokenCache {
     pub balance: Option<f64>,
 }
 
-/// 全局状态：各站 token 缓存 + 最近一次结果缓存
+/// 全局状态：各站 token 缓存 + 最近一次结果缓存 + 应用句柄（托盘等需要）
 #[derive(Default, Clone)]
 pub struct AppState {
     pub tokens: Arc<Mutex<HashMap<String, TokenCache>>>,
     pub results: Arc<Mutex<HashMap<String, SiteResult>>>,
+    /// setup 阶段写入，供刷新后更新托盘 tooltip 等使用
+    pub app_handle: std::sync::OnceLock<tauri::AppHandle>,
 }
 
 impl AppState {

@@ -91,6 +91,9 @@ const zh: Record<string, string> = {
   "notif.siteRecovered": "{name} 已恢复",
   "notif.channelsFailed": "{name} 渠道异常",
   "notif.andMore": "等 {count} 个渠道",
+  "update.available": "新版本 {version} 可用",
+  "update.download": "前往下载",
+  "trend.tooltip": "近 24 小时成功率：{first} → {last}（{start} 起）",
 };
 
 const en: Record<string, string> = {
@@ -178,6 +181,9 @@ const en: Record<string, string> = {
   "notif.siteRecovered": "{name} recovered",
   "notif.channelsFailed": "{name} channel failure",
   "notif.andMore": "and {count} more channels",
+  "update.available": "New version {version} available",
+  "update.download": "Get update",
+  "trend.tooltip": "Success rate (24h): {first} → {last} (since {start})",
 };
 
 const DICTS: Record<Lang, Record<string, string>> = { zh, en };

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   isPermissionGranted,
   requestPermission,
@@ -7,7 +8,7 @@ import {
 import ProviderFilter from "./components/ProviderFilter";
 import SettingsDialog from "./components/SettingsDialog";
 import SiteCard from "./components/SiteCard";
-import { getConfig, getResults, refreshAll, refreshSite, saveConfig } from "./lib/api";
+import { checkUpdate, getConfig, getResults, refreshAll, refreshSite, saveConfig } from "./lib/api";
 import { errMsg } from "./lib/errors";
 import { useI18n } from "./lib/i18n";
 import { bestAvailability, filterChannels, normalizeModels } from "./lib/models";
@@ -33,6 +34,7 @@ export default function App() {
   const [provider, setProvider] = useState<ProviderId | "all">("all");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
+  const [updateTag, setUpdateTag] = useState<string | null>(null);
 
   // 通知权限与上轮结果快照（用于刷新后对比出状态变化）
   const notifyAllowedRef = useRef(false);
@@ -50,6 +52,10 @@ export default function App() {
       if (!granted) granted = (await requestPermission()) === "granted";
       notifyAllowedRef.current = granted;
     })();
+    // 启动时检查新版本（失败静默，不打扰）
+    void checkUpdate()
+      .then((tag) => setUpdateTag(tag ?? null))
+      .catch(() => {});
   }, []);
 
   /** 对比上一轮结果，状态恶化/恢复时弹系统通知 */
@@ -305,6 +311,29 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-5xl px-6 py-6">
+        {updateTag && (
+          <div className="mb-4 flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300">
+            <span>{t("update.available", { version: updateTag })}</span>
+            <button
+              type="button"
+              onClick={() =>
+                void openUrl("https://github.com/mc0928/api-monitor/releases/latest")
+              }
+              className="font-medium underline underline-offset-2 hover:text-blue-800 dark:hover:text-blue-200"
+            >
+              {t("update.download")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setUpdateTag(null)}
+              className="ml-auto text-blue-400 hover:text-blue-600 dark:hover:text-blue-200"
+              aria-label="dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {loadError && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400">
             {loadError}
