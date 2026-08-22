@@ -34,15 +34,37 @@ pub struct SiteConfig {
     /// 为 true 时该站点的请求经代理（Clash 混合代理）发出
     #[serde(default)]
     pub vpn: bool,
-    /// new2api 站点：个人访问令牌
+    /// new2api 站点：个人访问令牌（可选；留空则仅拉取公开的模型广场性能数据）
     #[serde(default)]
     pub token: Option<String>,
+    /// new2api 站点：New-Api-User 请求头用的用户 ID（新版 new-api 鉴权需要）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
     /// sub2api 站点：登录账号（邮箱）
     #[serde(default)]
     pub username: Option<String>,
     /// sub2api 站点：登录密码
     #[serde(default)]
     pub password: Option<String>,
+}
+
+/// 自动刷新间隔（分钟）：0 = 关闭，可选 0 / 5 / 10 / 30，默认 5
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RefreshConfig {
+    #[serde(default = "default_interval_minutes")]
+    pub interval_minutes: u32,
+}
+
+fn default_interval_minutes() -> u32 {
+    5
+}
+
+impl Default for RefreshConfig {
+    fn default() -> Self {
+        Self {
+            interval_minutes: default_interval_minutes(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +123,11 @@ pub struct AppConfig {
     pub sites: Vec<SiteConfig>,
     #[serde(default)]
     pub monitor: MonitorConfig,
+    #[serde(default)]
+    pub refresh: RefreshConfig,
+    /// 调试模式：结果中保留原始响应片段（raw 字段）
+    #[serde(default)]
+    pub debug: bool,
 }
 
 /// 配置文件位置：config/sites.json

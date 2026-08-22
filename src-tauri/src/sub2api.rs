@@ -8,7 +8,7 @@ use crate::state::{
     now_secs, AppState, ChannelBalance, ChannelStatus, QuotaTier, SiteResult, TokenCache,
 };
 
-/// sub2api 站点采集：确保登录态 -> 拉取渠道监控列表
+/// sub2api 站点采集：确保登录态 -> 拉取渠道监控列表；401 时清缓存重登一次
 pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> SiteResult {
     let token = match ensure_token(client, site, state).await {
         Ok(t) => t,
@@ -19,22 +19,35 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
         "{}/api/v1/channel-monitors",
         site.base_url.trim_end_matches('/')
     );
-    let response = match client.get(&url).bearer_auth(&token.auth_token).send().await {
+
+    let (status, body) = match fetch_monitors(client, &url, &token.auth_token).await {
         Ok(r) => r,
-        Err(e) => return SiteResult::error(site, format!("请求失败: {e}")),
+        Err(e) => return SiteResult::error(site, e),
     };
 
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    // 401：令牌失效，清除缓存重新登录后再取一次
+    let (status, body) = if status == 401 {
+        state.clear_token(&site.id);
+        let token = match ensure_token(client, site, state).await {
+            Ok(t) => t,
+            Err(e) => return SiteResult::error(site, e),
+        };
+        match fetch_monitors(client, &url, &token.auth_token).await {
+            Ok(r) => r,
+            Err(e) => return SiteResult::error(site, e),
+        }
+    } else {
+        (status, body)
+    };
 
-    if status.as_u16() == 401 {
+    if status == 401 {
         state.clear_token(&site.id);
         return SiteResult::error(site, "channel-monitors 返回 401，令牌已失效".to_string());
     }
-    if !status.is_success() {
+    if !(200..300).contains(&status) {
         return SiteResult::error(
             site,
-            format!("HTTP {}：{}", status, truncate(body.trim(), 200)),
+            format!("HTTP {status}：{}", truncate(body.trim(), 200)),
         );
     }
 
@@ -47,9 +60,14 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
     let parsed = parse_channels(&value);
     result.balance_usd = site_balance_from_channels(&parsed).or(token.balance);
     result.channels = rank_channels(parsed);
-    // 字段结构未最终确定前，保留原始响应片段便于调试
+    // 字段结构未最终确定前，保留原始响应片段便于调试（调试开关关闭时由 lib.rs 剥离）
     result.raw = Some(truncate(&body, 2000));
     result
+}
+
+/// 拉取渠道监控列表（共用 GET，带一次传输层重试）
+async fn fetch_monitors(client: &Client, url: &str, token: &str) -> Result<(u16, String), String> {
+    crate::http::authorized_get(client, url, Some(token), None, None, 1).await
 }
 
 /// 站点级余额：优先取 USD，否则取渠道余额合计（同币种才汇总）

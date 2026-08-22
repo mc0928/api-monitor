@@ -16,27 +16,35 @@ const PERF_REQ_TIMEOUT: Duration = Duration::from_secs(5);
 /// New API 换算规则：500000 quota = $1
 const QUOTA_PER_USD: f64 = 500_000.0;
 
-/// new2api：查余额（/api/user/self）+ 分组性能（/api/perf-metrics/*）
+/// new2api：查余额（/api/user/self，需令牌）+ 分组性能（/api/perf-metrics/*，公开接口）。
+/// 未配置令牌时跳过余额查询，仅拉取模型广场性能数据。
 pub async fn check(client: &Client, site: &SiteConfig, monitor: &MonitorModels) -> SiteResult {
-    let token = site.token.clone().unwrap_or_default();
-    if token.trim().is_empty() || token.ends_with("...") {
-        return SiteResult::error(site, "未配置有效的访问令牌".to_string());
-    }
-
     let base = site.base_url.trim_end_matches('/');
-    let token = token.trim().to_string();
+    let raw_token = site.token.clone().unwrap_or_default();
+    let token = raw_token.trim();
+    let has_token = !token.is_empty() && !token.ends_with("...");
+    let token = has_token.then(|| token.to_string());
+    let user_id = site
+        .user_id
+        .clone()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty());
 
-    let self_h = spawn_authorized_get(
-        client.clone(),
-        format!("{base}/api/user/self"),
-        token.clone(),
-        None,
-        2,
-    );
+    let self_h = token.clone().map(|token| {
+        spawn_authorized_get(
+            client.clone(),
+            format!("{base}/api/user/self"),
+            Some(token),
+            user_id.clone(),
+            None,
+            2,
+        )
+    });
     let summary_h = spawn_authorized_get(
         client.clone(),
         format!("{base}/api/perf-metrics/summary?hours=24"),
         token.clone(),
+        user_id.clone(),
         None,
         1,
     );
@@ -53,37 +61,49 @@ pub async fn check(client: &Client, site: &SiteConfig, monitor: &MonitorModels) 
         let client = client.clone();
         let base = base.to_string();
         let token = token.clone();
+        let user_id = user_id.clone();
         tauri::async_runtime::spawn(async move {
-            fetch_group_perfs(&client, &base, &token, &available).await
+            fetch_group_perfs(&client, &base, token.as_deref(), user_id.as_deref(), &available)
+                .await
         })
     };
 
-    let self_body = match self_h.await {
-        Ok(Ok((status, body))) if (200..300).contains(&status) => body,
-        Ok(Ok((status, body))) => {
-            return SiteResult::error(site, format!("HTTP {status}：{}", truncate(body.trim(), 200)));
+    // 余额与请求数仅在配置了令牌时查询；匿名模式保持 None
+    let (quota, request_count) = match self_h {
+        Some(self_h) => {
+            let self_body = match self_h.await {
+                Ok(Ok((status, body))) if (200..300).contains(&status) => body,
+                Ok(Ok((status, body))) => {
+                    return SiteResult::error(
+                        site,
+                        format!("HTTP {status}：{}", truncate(body.trim(), 200)),
+                    );
+                }
+                Ok(Err(e)) => return SiteResult::error(site, e),
+                Err(e) => return SiteResult::error(site, format!("内部错误: {e}")),
+            };
+
+            let value: Value = match serde_json::from_str(&self_body) {
+                Ok(v) => v,
+                Err(e) => return SiteResult::error(site, format!("响应不是合法 JSON: {e}")),
+            };
+
+            let data = value.get("data").unwrap_or(&value);
+            let quota = pick_number(data, "quota").map(|v| v as i64);
+            let request_count = pick_number(data, "request_count").map(|v| v as u64);
+
+            if quota.is_none() && request_count.is_none() {
+                let mut result = SiteResult::error(
+                    site,
+                    "响应中未找到 quota / request_count 字段".to_string(),
+                );
+                result.raw = Some(truncate(&self_body, 2000));
+                return result;
+            }
+            (quota, request_count)
         }
-        Ok(Err(e)) => return SiteResult::error(site, e),
-        Err(e) => return SiteResult::error(site, format!("内部错误: {e}")),
+        None => (None, None),
     };
-
-    let value: Value = match serde_json::from_str(&self_body) {
-        Ok(v) => v,
-        Err(e) => return SiteResult::error(site, format!("响应不是合法 JSON: {e}")),
-    };
-
-    let data = value.get("data").unwrap_or(&value);
-    let quota = pick_number(data, "quota").map(|v| v as i64);
-    let request_count = pick_number(data, "request_count").map(|v| v as u64);
-
-    if quota.is_none() && request_count.is_none() {
-        let mut result = SiteResult::error(
-            site,
-            "响应中未找到 quota / request_count 字段".to_string(),
-        );
-        result.raw = Some(truncate(&self_body, 2000));
-        return result;
-    }
 
     let perfs = match perf_h.await {
         Ok(map) => map,
@@ -95,7 +115,9 @@ pub async fn check(client: &Client, site: &SiteConfig, monitor: &MonitorModels) 
     result.balance_usd = quota.map(|q| q as f64 / QUOTA_PER_USD);
     result.request_count = request_count;
     result.channels = parse_plaza_channels(&perfs, monitor);
-    if result.channels.is_empty() {
+    if !has_token {
+        result.note = Some("未配置访问令牌，仅显示模型广场数据（余额不可用）".to_string());
+    } else if result.channels.is_empty() {
         result.note = Some("暂无分组性能数据".to_string());
     }
     result
@@ -128,7 +150,8 @@ fn summary_models(summary: &Value) -> Vec<String> {
 async fn fetch_group_perfs(
     client: &Client,
     base: &str,
-    token: &str,
+    token: Option<&str>,
+    user_id: Option<&str>,
     models: &[String],
 ) -> HashMap<String, GroupPerf> {
     if models.is_empty() {
@@ -145,9 +168,18 @@ async fn fetch_group_perfs(
                 "{base}/api/perf-metrics?model={}&hours=24",
                 urlencoding_lite(model)
             );
-            let token = token.to_string();
+            let token = token.map(str::to_string);
+            let user_id = user_id.map(str::to_string);
             handles.push(tauri::async_runtime::spawn(async move {
-                authorized_get(&client, &url, &token, Some(PERF_REQ_TIMEOUT), 0).await
+                crate::http::authorized_get(
+                    &client,
+                    &url,
+                    token.as_deref(),
+                    user_id.as_deref(),
+                    Some(PERF_REQ_TIMEOUT),
+                    0,
+                )
+                .await
             }));
         }
         for handle in handles {
@@ -285,60 +317,22 @@ fn parse_plaza_channels(
 fn spawn_authorized_get(
     client: Client,
     url: String,
-    token: String,
+    token: Option<String>,
+    user_id: Option<String>,
     timeout: Option<Duration>,
     retries: u32,
 ) -> tauri::async_runtime::JoinHandle<Result<(u16, String), String>> {
     tauri::async_runtime::spawn(async move {
-        authorized_get(&client, &url, &token, timeout, retries).await
+        crate::http::authorized_get(
+            &client,
+            &url,
+            token.as_deref(),
+            user_id.as_deref(),
+            timeout,
+            retries,
+        )
+        .await
     })
-}
-
-async fn authorized_get(
-    client: &Client,
-    url: &str,
-    token: &str,
-    timeout: Option<Duration>,
-    retries: u32,
-) -> Result<(u16, String), String> {
-    let mut last_err = String::new();
-    for attempt in 0..=retries {
-        let mut req = client
-            .get(url)
-            .bearer_auth(token)
-            .header("User-Agent", "api-monitor/0.1");
-        if let Some(timeout) = timeout {
-            req = req.timeout(timeout);
-        }
-        match req.send().await {
-            Ok(response) => {
-                let status = response.status().as_u16();
-                let body = response.text().await.unwrap_or_default();
-                return Ok((status, body));
-            }
-            Err(e) => {
-                last_err = describe_request_error(&e);
-                if attempt < retries {
-                    continue;
-                }
-            }
-        }
-    }
-    Err(last_err)
-}
-
-fn describe_request_error(err: &reqwest::Error) -> String {
-    if err.is_timeout() {
-        return "连接超时，请稍后重试".to_string();
-    }
-    if err.is_connect() {
-        return "无法连接到站点（网络或证书问题）".to_string();
-    }
-    let msg = err.to_string().to_ascii_lowercase();
-    if msg.contains("dns") || msg.contains("resolve") {
-        return "域名解析失败".to_string();
-    }
-    "无法访问站点".to_string()
 }
 
 /// 宽松取数字字段：兼容数字与字符串数字

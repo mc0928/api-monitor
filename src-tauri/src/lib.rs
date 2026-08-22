@@ -2,6 +2,7 @@ mod config;
 mod http;
 mod models;
 mod new2api;
+mod persist;
 mod state;
 mod sub2api;
 
@@ -9,6 +10,7 @@ use std::time::Instant;
 
 use config::{AppConfig, SiteConfig, SiteType};
 use state::{AppState, SiteResult};
+use tauri::Manager;
 
 /// 读取配置（含代理地址与站点列表）
 #[tauri::command]
@@ -53,7 +55,14 @@ async fn refresh_site(
         .find(|s| s.id == id)
         .cloned()
         .ok_or_else(|| format!("未找到站点: {id}"))?;
-    Ok(refresh_one_cached(&site, &cfg.proxy.url, None, &cfg.monitor.models, &state).await)
+    let result =
+        refresh_one_cached(&site, &cfg.proxy.url, None, &cfg.monitor.models, cfg.debug, &state)
+            .await;
+    // 持久化当前快照，失败仅记录日志，不影响返回
+    if let Err(e) = persist::save(&state.results_map()) {
+        eprintln!("持久化结果失败: {e}");
+    }
+    Ok(result)
 }
 
 /// 并发刷新全部站点（互不阻塞），按配置顺序返回结果
@@ -65,6 +74,7 @@ async fn refresh_all(state: tauri::State<'_, AppState>) -> Result<Vec<SiteResult
     // 客户端构建失败（如代理地址非法）直接返回明确错误，不再静默降级
     let direct = http::build_client(None)?;
     let via_proxy = http::build_client(Some(&cfg.proxy.url))?;
+    let debug = cfg.debug;
 
     let mut handles = Vec::new();
     for site in cfg.sites {
@@ -78,7 +88,7 @@ async fn refresh_all(state: tauri::State<'_, AppState>) -> Result<Vec<SiteResult
         handles.push((
             site.clone(),
             tauri::async_runtime::spawn(async move {
-                refresh_one_shared(&site, &shared, &models, &app_state).await
+                refresh_one_shared(&site, &shared, &models, debug, &app_state).await
             }),
         ));
     }
@@ -94,6 +104,10 @@ async fn refresh_all(state: tauri::State<'_, AppState>) -> Result<Vec<SiteResult
                 results.push(result);
             }
         }
+    }
+    // 持久化当前快照，失败仅记录日志，不影响返回
+    if let Err(e) = persist::save(&state.results_map()) {
+        eprintln!("持久化结果失败: {e}");
     }
     Ok(results)
 }
@@ -138,6 +152,7 @@ async fn refresh_one_cached(
     proxy_url: &str,
     shared: Option<reqwest::Client>,
     models: &config::MonitorModels,
+    debug: bool,
     state: &AppState,
 ) -> SiteResult {
     let client = match shared {
@@ -154,7 +169,7 @@ async fn refresh_one_cached(
             }
         }
     };
-    refresh_one_shared(site, &client, models, state).await
+    refresh_one_shared(site, &client, models, debug, state).await
 }
 
 /// 用已构建的客户端检查站点，结果写入缓存
@@ -162,20 +177,35 @@ async fn refresh_one_shared(
     site: &SiteConfig,
     client: &reqwest::Client,
     models: &config::MonitorModels,
+    debug: bool,
     state: &AppState,
 ) -> SiteResult {
-    let result = match site.site_type {
+    let mut result = match site.site_type {
         SiteType::New2api => new2api::check(client, site, models).await,
         SiteType::Sub2api => sub2api::check(client, site, state).await,
     };
+    // 非调试模式剥离原始响应片段，避免敏感/冗长数据进缓存与落盘
+    if !debug {
+        result.raw = None;
+    }
     state.set_result(result.clone());
     result
 }
 
+/// 显示主窗口并聚焦（窗口不存在等情况直接忽略）
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let state = AppState::with_persisted();
     tauri::Builder::default()
-        .manage(AppState::default())
+        .plugin(tauri_plugin_notification::init())
+        .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
@@ -184,6 +214,46 @@ pub fn run() {
             get_results,
             test_proxy
         ])
+        .setup(|app| {
+            use tauri::menu::{Menu, MenuItem};
+            use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+            // 托盘菜单：显示主窗口 / 退出
+            let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+
+            TrayIconBuilder::with_id("main-tray")
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("API Monitor")
+                .show_menu_on_left_click(false)
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // 左键单击抬起时显示主窗口
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 关闭窗口 = 隐藏到托盘后台，刷新与通知仍可工作
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

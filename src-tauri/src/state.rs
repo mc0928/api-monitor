@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::{SiteConfig, SiteType};
 
 /// 单个用量窗口（对齐 sub2api MonitorQuotaTier）
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaTier {
     pub window: String,
     pub label: Option<String>,
@@ -17,14 +17,14 @@ pub struct QuotaTier {
 }
 
 /// 渠道余额（单币种）
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelBalance {
     pub currency: String,
     pub balance: f64,
 }
 
 /// 单个渠道的状态（new2api / sub2api 站点通用）
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelStatus {
     pub name: String,
     pub online: bool,
@@ -45,7 +45,7 @@ pub struct ChannelStatus {
 }
 
 /// 单个站点最近一次检查结果
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteResult {
     pub id: String,
     pub name: String,
@@ -122,6 +122,23 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// 以持久化的上次结果快照构造（重启后立即恢复展示，无需等首次刷新）
+    pub fn with_persisted() -> Self {
+        let state = Self::default();
+        let persisted = crate::persist::load();
+        if !persisted.is_empty() {
+            if let Ok(mut map) = state.results.lock() {
+                *map = persisted;
+            }
+        }
+        state
+    }
+
+    /// 克隆当前全部结果快照（供持久化落盘）
+    pub fn results_map(&self) -> HashMap<String, SiteResult> {
+        self.results.lock().map(|m| m.clone()).unwrap_or_default()
+    }
+
     pub fn get_token(&self, site_id: &str) -> Option<TokenCache> {
         self.tokens.lock().ok()?.get(site_id).cloned()
     }
