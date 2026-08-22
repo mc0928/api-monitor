@@ -1,5 +1,7 @@
 # API Monitor
 
+[简体中文](./README.md) | [English](./README.en.md)
+
 渠道状态监控桌面小程序：集中查看多个中转站点的余额、渠道状态与成功率。
 
 前端：Tauri 2 + React 18 + TypeScript + Tailwind CSS；后端：Rust / reqwest。
@@ -85,6 +87,17 @@ cargo test            # 后端解析逻辑单元测试（src-tauri 目录下）
 - `sites[].vpn`：为 `true` 时该站点的请求经代理发出
 
 配置文件查找顺序：当前工作目录 → exe 所在目录逐级向上，取第一个已存在的 `config/sites.json`，这样无论从项目根目录还是直接双击 exe 启动，都能定位到同一份配置。
+
+## 安全性
+
+- **凭据仅存本地**：令牌、账号密码明文保存在 `config/sites.json`（已加入 `.gitignore`，仓库不包含任何真实凭据）；sub2api 登录令牌只缓存在内存中，不落盘
+- **数据只出不进**：应用仅向你配置的站点发请求，无遥测、无上报
+- **CSP**：WebView 开启了内容安全策略，默认仅允许加载应用自身资源
+- 请勿将包含真实凭据的 `sites.json` 提交到任何仓库或分享给他人
+
+## 图标版权
+
+界面中的模型厂商图标（OpenAI、Anthropic Claude、xAI Grok、Moonshot Kimi）仅作指代用途，其商标与版权归各自厂商所有；图标路径取自 [Simple Icons](https://simple-icons.org/)（CC0）与 [lobe-icons](https://github.com/lobehub/lobe-icons)（MIT）。
 
 ## 目录结构
 
