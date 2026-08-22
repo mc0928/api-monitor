@@ -304,9 +304,6 @@ export default function App() {
         </div>
         <div className="mx-auto flex max-w-5xl items-center gap-3 px-6 pb-3">
           <ProviderFilter value={provider} onChange={setProvider} />
-          <span className="text-xs text-gray-400">
-            {sortBy === "manual" ? t("filter.manualOrderHint") : t("filter.rankHint")}
-          </span>
         </div>
       </header>
 
