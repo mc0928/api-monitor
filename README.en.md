@@ -14,8 +14,6 @@ If you hold accounts on multiple new2api / sub2api relay sites, you probably kno
 - A channel quietly breaks and you only notice after users complain
 - Comparing group success rates across sites means logging into each one
 
-![Dashboard screenshot](docs/screenshot.png)
-
 ## What it does
 
 **Monitoring**
