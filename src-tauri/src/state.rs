@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{SiteConfig, SiteType};
+use crate::models::{as_percent, unix_to_iso};
 
 /// 单个用量窗口（对齐 sub2api MonitorQuotaTier）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +40,7 @@ pub struct ChannelStatus {
     /// operational | degraded | failed | unknown
     pub status: String,
     pub plan_level: Option<String>,
-    /// gpt | claude | grok | kimi | gemini
+    /// gpt | claude | grok | kimi | gemini | qwen | seedream
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// 统一后的模型名，如 claude-sonnet-4-6
@@ -49,6 +50,9 @@ pub struct ChannelStatus {
     pub latency_ms: Option<i64>,
     pub tiers: Vec<QuotaTier>,
     pub balances: Vec<ChannelBalance>,
+    /// new-api 渠道分组的模型倍率
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ratio: Option<f64>,
     /// 成功率趋势（V2 被动监控的逐时桶数据）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trend: Option<Vec<TrendPoint>>,
@@ -173,6 +177,19 @@ impl AppState {
         }
     }
 
+    /// 合并站点原始趋势与本地分钟采样，然后写入缓存并返回同一份结果。
+    pub fn merge_and_set_result(&self, mut result: SiteResult) -> SiteResult {
+        if let Ok(mut map) = self.results.lock() {
+            if let Some(previous) = map.get(&result.id) {
+                merge_trends(previous, &mut result);
+            } else {
+                add_minute_samples(&mut result);
+            }
+            map.insert(result.id.clone(), result.clone());
+        }
+        result
+    }
+
     pub fn prune_sites(&self, keep: &[String]) {
         if let Ok(mut map) = self.results.lock() {
             map.retain(|id, _| keep.iter().any(|k| k == id));
@@ -180,5 +197,115 @@ impl AppState {
         if let Ok(mut map) = self.tokens.lock() {
             map.retain(|id, _| keep.iter().any(|k| k == id));
         }
+    }
+}
+
+fn channel_key(channel: &ChannelStatus) -> (&str, &str) {
+    (&channel.name, channel.model.as_deref().unwrap_or(""))
+}
+
+fn merge_trends(previous: &SiteResult, current: &mut SiteResult) {
+    for channel in &mut current.channels {
+        let old = previous
+            .channels
+            .iter()
+            .find(|candidate| channel_key(candidate) == channel_key(channel));
+        let mut points = BTreeMap::new();
+        if let Some(old) = old.and_then(|candidate| candidate.trend.as_ref()) {
+            points.extend(old.iter().map(|point| (point.t.clone(), point.v)));
+        }
+        if let Some(fresh) = channel.trend.take() {
+            points.extend(fresh.into_iter().map(|point| (point.t, point.v)));
+        }
+        if let Some(value) = channel.availability {
+            points.insert(minute_label(current.checked_at), as_percent(value));
+        }
+        let merged = last_points(points, 1_440);
+        channel.trend = (!merged.is_empty()).then_some(merged);
+    }
+}
+
+fn add_minute_samples(result: &mut SiteResult) {
+    for channel in &mut result.channels {
+        let Some(value) = channel.availability else {
+            continue;
+        };
+        let mut points = BTreeMap::new();
+        if let Some(fresh) = channel.trend.take() {
+            points.extend(fresh.into_iter().map(|point| (point.t, point.v)));
+        }
+        points.insert(minute_label(result.checked_at), as_percent(value));
+        let merged = last_points(points, 1_440);
+        channel.trend = (!merged.is_empty()).then_some(merged);
+    }
+}
+
+fn minute_label(checked_at: u64) -> String {
+    unix_to_iso(((checked_at / 60_000) * 60) as i64)
+}
+
+fn last_points(points: BTreeMap<String, f64>, limit: usize) -> Vec<TrendPoint> {
+    let skip = points.len().saturating_sub(limit);
+    points
+        .into_iter()
+        .skip(skip)
+        .map(|(t, v)| TrendPoint { t, v })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(availability: f64, trend: Vec<TrendPoint>) -> ChannelStatus {
+        ChannelStatus {
+            name: "vip".into(),
+            online: true,
+            detail: String::new(),
+            status: "operational".into(),
+            plan_level: None,
+            provider: Some("gpt".into()),
+            model: Some("gpt-5.6-sol".into()),
+            availability: Some(availability),
+            latency_ms: None,
+            tiers: Vec::new(),
+            balances: Vec::new(),
+            model_ratio: Some(0.16),
+            trend: Some(trend),
+        }
+    }
+
+    #[test]
+    fn merge_trends_keeps_history_and_adds_minute_sample() {
+        let site = SiteConfig {
+            id: "site".into(),
+            name: "Site".into(),
+            site_type: SiteType::New2api,
+            base_url: "https://example.com".into(),
+            vpn: false,
+            token: None,
+            user_id: None,
+            username: None,
+            password: None,
+        };
+        let mut previous = SiteResult::base(&site, true, None);
+        previous.channels = vec![channel(
+            90.0,
+            vec![TrendPoint {
+                t: "2026-08-22T12:00:00Z".into(),
+                v: 90.0,
+            }],
+        )];
+        let mut current = SiteResult::base(&site, true, None);
+        current.checked_at = 1_787_403_660_000;
+        current.channels = vec![channel(96.0, Vec::new())];
+
+        merge_trends(&previous, &mut current);
+
+        let trend = current.channels[0].trend.as_ref().unwrap();
+        assert_eq!(trend.len(), 2);
+        assert_eq!(trend[0].t, "2026-08-22T12:00:00Z");
+        assert_eq!(trend[1].v, 96.0);
+        assert!(trend[1].t.ends_with(":00Z"));
     }
 }

@@ -30,7 +30,7 @@ const inputClass =
 
 /** 自动刷新间隔选项：0 = 关闭
  */
-const INTERVAL_OPTIONS = [0, 5, 10, 30];
+const INTERVAL_OPTIONS = [0, 1, 2, 5, 10, 30];
 
 function newSite(): SiteConfig {
   return {
@@ -51,7 +51,7 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
   const [saving, setSaving] = useState(false);
 
   const models = config ? normalizeModels(config.monitor?.models) : null;
-  const intervalMinutes = config?.refresh?.interval_minutes ?? 5;
+  const intervalMinutes = config?.refresh?.interval_minutes ?? 1;
 
   useEffect(() => {
     getConfig()

@@ -1,6 +1,6 @@
 [package]
 name = "api-monitor"
-version = "0.3.0"
+version = "0.1.0"
 description = "渠道状态监控小程序"
 edition = "2021"
 

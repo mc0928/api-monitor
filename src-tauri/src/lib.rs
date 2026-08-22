@@ -44,10 +44,7 @@ fn save_config(cfg: AppConfig, state: tauri::State<'_, AppState>) -> Result<(), 
 
 /// 刷新单个站点
 #[tauri::command]
-async fn refresh_site(
-    id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<SiteResult, String> {
+async fn refresh_site(id: String, state: tauri::State<'_, AppState>) -> Result<SiteResult, String> {
     let cfg = config::load_config()?;
     let site = cfg
         .sites
@@ -55,9 +52,15 @@ async fn refresh_site(
         .find(|s| s.id == id)
         .cloned()
         .ok_or_else(|| format!("未找到站点: {id}"))?;
-    let result =
-        refresh_one_cached(&site, &cfg.proxy.url, None, &cfg.monitor.models, cfg.debug, &state)
-            .await;
+    let result = refresh_one_cached(
+        &site,
+        &cfg.proxy.url,
+        None,
+        &cfg.monitor.models,
+        cfg.debug,
+        &state,
+    )
+    .await;
     // 持久化当前快照，失败仅记录日志，不影响返回
     if let Err(e) = persist::save(&state.results_map()) {
         eprintln!("持久化结果失败: {e}");
@@ -184,14 +187,13 @@ async fn refresh_one_shared(
 ) -> SiteResult {
     let mut result = match site.site_type {
         SiteType::New2api => new2api::check(client, site, models).await,
-        SiteType::Sub2api => sub2api::check(client, site, state).await,
+        SiteType::Sub2api => sub2api::check(client, site, models, state).await,
     };
     // 非调试模式剥离原始响应片段，避免敏感/冗长数据进缓存与落盘
     if !debug {
         result.raw = None;
     }
-    state.set_result(result.clone());
-    result
+    state.merge_and_set_result(result)
 }
 
 /// 显示主窗口并聚焦（窗口不存在等情况直接忽略）
@@ -241,7 +243,9 @@ async fn check_update() -> Result<Option<String>, String> {
         http::build_client(Some(&cfg.proxy.url))?
     };
     let response = client
-        .get(format!("https://api.github.com/repos/{REPO}/releases/latest"))
+        .get(format!(
+            "https://api.github.com/repos/{REPO}/releases/latest"
+        ))
         .header("User-Agent", "api-monitor")
         .timeout(std::time::Duration::from_secs(8))
         .send()
@@ -267,7 +271,11 @@ fn version_newer(tag: &str, current: &str) -> bool {
     let parse = |s: &str| -> Vec<u64> {
         s.trim_start_matches(['v', 'V'])
             .split(['.', '-', '+'])
-            .map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+            .map(|p| {
+                p.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+            })
             .filter(|p| !p.is_empty())
             .filter_map(|p| p.parse().ok())
             .collect()
@@ -311,10 +319,7 @@ pub fn run() {
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
             // 记录 AppHandle 供托盘摘要更新使用；并立即用持久化结果刷新一次 tooltip
-            let _ = app
-                .state::<AppState>()
-                .app_handle
-                .set(app.handle().clone());
+            let _ = app.state::<AppState>().app_handle.set(app.handle().clone());
             update_tray_tooltip(app.state::<AppState>().inner());
 
             // 托盘菜单：显示主窗口 / 退出

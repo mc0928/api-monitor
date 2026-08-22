@@ -16,7 +16,7 @@ export interface SiteConfig {
   password?: string | null;
 }
 
-export type ProviderId = "gpt" | "claude" | "grok" | "kimi" | "gemini";
+export type ProviderId = "gpt" | "claude" | "grok" | "kimi" | "gemini" | "qwen" | "seedream";
 
 export interface MonitorModels {
   gpt: string[];
@@ -24,6 +24,8 @@ export interface MonitorModels {
   grok: string[];
   kimi: string[];
   gemini: string[];
+  qwen: string[];
+  seedream: string[];
 }
 
 export interface MonitorConfig {
@@ -31,7 +33,7 @@ export interface MonitorConfig {
 }
 
 export interface RefreshConfig {
-  /** 自动刷新间隔（分钟）：0=关闭，可选 0/5/10/30，默认 5（读取处防御式 ?? 5） */
+  /** 自动刷新间隔（分钟）：0=关闭，可选 0/1/2/5/10/30，默认 1 */
   interval_minutes: number;
 }
 
@@ -39,7 +41,7 @@ export interface AppConfig {
   proxy: { url: string };
   sites: SiteConfig[];
   monitor: MonitorConfig;
-  /** 自动刷新（缺省时按 interval_minutes=5 处理） */
+  /** 自动刷新（缺省时按 interval_minutes=1 处理） */
   refresh?: RefreshConfig;
   /** 调试模式：false 时后端会剥离 raw 字段（读取处防御式 ?? false） */
   debug?: boolean;
@@ -74,13 +76,15 @@ export interface ChannelStatus {
   /** operational | degraded | failed | unknown */
   status: string;
   plan_level: string | null;
-  /** gpt | claude | grok | kimi | gemini */
+  /** gpt | claude | grok | kimi | gemini | qwen | seedream */
   provider?: string | null;
   model?: string | null;
   availability: number | null;
   latency_ms: number | null;
   tiers: QuotaTier[];
   balances: ChannelBalance[];
+  /** new-api 渠道分组的模型倍率 */
+  model_ratio?: number | null;
   /** 成功率趋势（V2 被动监控逐时桶） */
   trend?: TrendPoint[] | null;
 }

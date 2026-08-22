@@ -48,7 +48,7 @@ pub struct SiteConfig {
     pub password: Option<String>,
 }
 
-/// 自动刷新间隔（分钟）：0 = 关闭，可选 0 / 5 / 10 / 30，默认 5
+/// 自动刷新间隔（分钟）：0 = 关闭，可选 0 / 1 / 2 / 5 / 10 / 30，默认 1
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RefreshConfig {
     #[serde(default = "default_interval_minutes")]
@@ -56,7 +56,7 @@ pub struct RefreshConfig {
 }
 
 fn default_interval_minutes() -> u32 {
-    5
+    1
 }
 
 impl Default for RefreshConfig {
@@ -79,6 +79,18 @@ pub struct MonitorModels {
     pub kimi: Vec<String>,
     #[serde(default)]
     pub gemini: Vec<String>,
+    #[serde(default = "default_qwen_models")]
+    pub qwen: Vec<String>,
+    #[serde(default = "default_seedream_models")]
+    pub seedream: Vec<String>,
+}
+
+fn default_qwen_models() -> Vec<String> {
+    vec!["Qwen/Qwen3-Embedding-0.6B".into()]
+}
+
+fn default_seedream_models() -> Vec<String> {
+    vec!["byte-plus-seedream-4-5".into()]
 }
 
 impl Default for MonitorModels {
@@ -89,6 +101,8 @@ impl Default for MonitorModels {
             grok: vec!["grok-4.6".into()],
             kimi: vec!["kimi-k3".into()],
             gemini: vec!["gemini-2.5-pro".into(), "gemini-2.5-flash".into()],
+            qwen: default_qwen_models(),
+            seedream: default_seedream_models(),
         }
     }
 }
@@ -100,11 +114,17 @@ impl MonitorModels {
             && self.grok.is_empty()
             && self.kimi.is_empty()
             && self.gemini.is_empty()
+            && self.qwen.is_empty()
+            && self.seedream.is_empty()
     }
 
     /// 全部配置模型名（去重、去空白）；全空时回退默认
     pub fn all_names(&self) -> Vec<String> {
-        let src = if self.is_empty() { Self::default() } else { self.clone() };
+        let src = if self.is_empty() {
+            Self::default()
+        } else {
+            self.clone()
+        };
         let mut names: Vec<String> = Vec::new();
         for name in src
             .gpt
@@ -113,6 +133,8 @@ impl MonitorModels {
             .chain(&src.grok)
             .chain(&src.kimi)
             .chain(&src.gemini)
+            .chain(&src.qwen)
+            .chain(&src.seedream)
         {
             let trimmed = name.trim();
             if !trimmed.is_empty() && !names.iter().any(|n| n == trimmed) {
@@ -160,12 +182,26 @@ pub struct AppConfig {
     pub sort_by: SortBy,
 }
 
-/// 配置文件位置：config/sites.json
-///
-/// 依次探测「当前工作目录」与「exe 所在目录及其逐级上级目录」，
-/// 取第一个已存在的文件；都不存在时回退到工作目录下的相对路径（供首次保存创建）。
-/// 这样无论从项目根目录启动、src-tauri 目录 cargo run，还是直接双击 target 里的 exe，
-/// 都能定位到同一份配置。
+fn user_config_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let root = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let root = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library").join("Application Support"));
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let root = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".config"))
+        });
+
+    root.map(|root| root.join("api-monitor").join("sites.json"))
+}
+
+/// 开发环境优先使用项目内的 config/sites.json；安装环境使用系统用户配置目录。
 pub fn config_path() -> Result<PathBuf, String> {
     let rel = PathBuf::from("config").join("sites.json");
 
@@ -186,13 +222,17 @@ pub fn config_path() -> Result<PathBuf, String> {
     Ok(candidates
         .into_iter()
         .find(|p| p.is_file())
+        .or_else(user_config_path)
         .unwrap_or(rel))
 }
 
 pub fn load_config() -> Result<AppConfig, String> {
     let path = config_path()?;
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("读取配置文件失败（{}）: {e}", path.display()))?;
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AppConfig::default()),
+        Err(e) => return Err(format!("读取配置文件失败（{}）: {e}", path.display())),
+    };
     serde_json::from_str(&raw).map_err(|e| format!("配置文件格式错误: {e}"))
 }
 

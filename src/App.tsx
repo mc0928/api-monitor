@@ -156,21 +156,27 @@ export default function App() {
   }, [load]);
 
   const handleRefreshAll = useCallback(async () => {
-    if (refreshingRef.current) return;
+    if (refreshingRef.current || !config) return;
     refreshingRef.current = true;
     setRefreshingAll(true);
     try {
-      applyResults(await refreshAll());
-    } catch (e) {
-      setLoadError(errMsg(e));
+      await Promise.all(
+        config.sites.map(async (site) => {
+          try {
+            applyResults([await refreshSite(site.id)]);
+          } catch (e) {
+            setLoadError(errMsg(e));
+          }
+        }),
+      );
     } finally {
       setRefreshingAll(false);
       refreshingRef.current = false;
     }
-  }, [t]);
+  }, [config, t]);
 
   // 自动刷新：0 = 关闭；窗口隐藏到托盘时定时器可能被节流，分钟级间隔不受实质影响
-  const intervalMinutes = config?.refresh?.interval_minutes ?? 5;
+  const intervalMinutes = config?.refresh?.interval_minutes ?? 1;
   useEffect(() => {
     if (!intervalMinutes) return;
     const id = setInterval(() => void handleRefreshAll(), intervalMinutes * 60_000);

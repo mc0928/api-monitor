@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use reqwest::Client;
 
-/// 出站请求超时：连接 5s，整体 12s
-pub const TIMEOUT: Duration = Duration::from_secs(12);
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// 交互刷新应快速完成：故障站点最多等待 8s，连接阶段最多等待 3s。
+pub const TIMEOUT: Duration = Duration::from_secs(8);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 按字符数截断字符串（避免中文截断在字符中间）
 pub fn truncate(s: &str, max_chars: usize) -> String {
@@ -20,8 +20,7 @@ pub fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
         .tcp_nodelay(true)
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) api-monitor/0.1");
     if let Some(url) = proxy_url.map(str::trim).filter(|u| !u.is_empty()) {
-        let proxy = reqwest::Proxy::all(url)
-            .map_err(|e| format!("代理地址无效（{url}）: {e}"))?;
+        let proxy = reqwest::Proxy::all(url).map_err(|e| format!("代理地址无效（{url}）: {e}"))?;
         builder = builder.proxy(proxy);
     }
     builder
@@ -29,45 +28,39 @@ pub fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
         .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))
 }
 
-/// new2api / sub2api 共用的带鉴权 GET：可选 Bearer 令牌与 New-Api-User 头，
-/// 传输层错误（超时/断连）按 retries 重试，HTTP 状态码错误不重试。
+/// new2api / sub2api 共用的带鉴权 GET：可选 Bearer 令牌与 New-Api-User 头。
 pub async fn authorized_get(
     client: &Client,
     url: &str,
     token: Option<&str>,
     user_id: Option<&str>,
     timeout: Option<Duration>,
-    retries: u32,
 ) -> Result<(u16, String), String> {
     let token = token.map(str::trim).filter(|t| !t.is_empty());
     let user_id = user_id.map(str::trim).filter(|u| !u.is_empty());
-    let mut last_err = String::new();
-    for attempt in 0..=retries {
-        let mut req = client.get(url);
-        if let Some(token) = token {
-            req = req.bearer_auth(token);
-        }
-        if let Some(id) = user_id {
-            req = req.header("New-Api-User", id);
-        }
-        if let Some(timeout) = timeout {
-            req = req.timeout(timeout);
-        }
-        match req.send().await {
-            Ok(response) => {
-                let status = response.status().as_u16();
-                let body = response.text().await.unwrap_or_default();
-                return Ok((status, body));
-            }
-            Err(e) => {
-                last_err = describe_request_error(&e);
-                if attempt < retries {
-                    continue;
-                }
-            }
-        }
+    let mut req = client.get(url);
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
     }
-    Err(last_err)
+    if let Some(id) = user_id {
+        req = req.header("New-Api-User", id);
+    }
+    if let Some(timeout) = timeout {
+        req = req.timeout(timeout);
+    }
+    // 监控接口可能经过 CDN/反向代理；每次刷新都要求重新验证，避免趋势图拿到旧响应。
+    let response = req
+        .header(
+            reqwest::header::CACHE_CONTROL,
+            "no-cache, no-store, max-age=0",
+        )
+        .header(reqwest::header::PRAGMA, "no-cache")
+        .send()
+        .await
+        .map_err(|e| describe_request_error(&e))?;
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    Ok((status, body))
 }
 
 fn describe_request_error(err: &reqwest::Error) -> String {

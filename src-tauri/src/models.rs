@@ -6,6 +6,8 @@ pub enum Provider {
     Grok,
     Kimi,
     Gemini,
+    Qwen,
+    Seedream,
 }
 
 impl Provider {
@@ -16,6 +18,8 @@ impl Provider {
             Self::Grok => "grok",
             Self::Kimi => "kimi",
             Self::Gemini => "gemini",
+            Self::Qwen => "qwen",
+            Self::Seedream => "seedream",
         }
     }
 
@@ -26,6 +30,8 @@ impl Provider {
             "grok" | "xai" => Some(Self::Grok),
             "kimi" | "moonshot" => Some(Self::Kimi),
             "gemini" | "google" => Some(Self::Gemini),
+            "qwen" | "alibaba" | "dashscope" => Some(Self::Qwen),
+            "seedream" | "bytedance" | "volcengine" => Some(Self::Seedream),
             _ => None,
         }
     }
@@ -33,10 +39,7 @@ impl Provider {
 
 pub fn normalize_model(s: &str) -> String {
     let lower = s.trim().to_ascii_lowercase();
-    let stripped = lower
-        .rsplit(['/', ':'])
-        .next()
-        .unwrap_or(lower.as_str());
+    let stripped = lower.rsplit(['/', ':']).next().unwrap_or(lower.as_str());
     stripped
         .chars()
         .map(|c| if c == '.' || c == '_' { '-' } else { c })
@@ -62,6 +65,9 @@ pub fn models_match(a: &str, b: &str) -> bool {
 pub fn detect_provider(text: &str) -> Option<Provider> {
     let raw = text.to_ascii_lowercase();
     let n = normalize_model(text);
+    if is_non_chat_model(&n) {
+        return None;
+    }
     if n.contains("claude")
         || n.contains("sonnet")
         || n.contains("opus")
@@ -79,6 +85,12 @@ pub fn detect_provider(text: &str) -> Option<Provider> {
     if n.contains("gemini") || raw.contains("google") {
         return Some(Provider::Gemini);
     }
+    if n.contains("qwen") || raw.contains("dashscope") || raw.contains("alibaba") {
+        return Some(Provider::Qwen);
+    }
+    if n.contains("seedream") || raw.contains("volcengine") || raw.contains("bytedance") {
+        return Some(Provider::Seedream);
+    }
     if n.contains("gpt")
         || n.contains("chatgpt")
         || n.contains("openai")
@@ -91,6 +103,14 @@ pub fn detect_provider(text: &str) -> Option<Provider> {
     None
 }
 
+/// 排除当前未单独展示的图片模型族；gpt-image、Qwen 向量模型和 Seedream 会正常归类。
+pub fn is_non_chat_model(text: &str) -> bool {
+    let n = normalize_model(text);
+    ["dall-e", "dalle", "imagen", "nano-banana"]
+        .iter()
+        .any(|marker| n.contains(marker))
+}
+
 pub fn as_percent(value: f64) -> f64 {
     if value < 0.0 {
         0.0
@@ -99,6 +119,23 @@ pub fn as_percent(value: f64) -> f64 {
     } else {
         value.min(100.0)
     }
+}
+
+/// Unix 秒转 UTC ISO 时间，避免为简单时间标签引入额外日期依赖。
+pub fn unix_to_iso(secs: i64) -> String {
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
 /// 渠道行右侧小字：`gpt-5.6-sol · 5783ms · 100.0%`
@@ -162,8 +199,29 @@ mod tests {
         assert_eq!(detect_provider("kimi-k2.5"), Some(Provider::Kimi));
         assert_eq!(detect_provider("anthropic"), Some(Provider::Claude));
         assert_eq!(detect_provider("gemini-2.5-pro"), Some(Provider::Gemini));
+        assert_eq!(
+            detect_provider("Qwen/Qwen3-Embedding-0.6B"),
+            Some(Provider::Qwen)
+        );
+        assert_eq!(
+            detect_provider("byte-plus-seedream-4-5"),
+            Some(Provider::Seedream)
+        );
         assert_eq!(detect_provider("google"), Some(Provider::Gemini));
         assert_eq!(Provider::from_id("google"), Some(Provider::Gemini));
+    }
+
+    #[test]
+    fn image_and_embedding_models_use_their_configured_families() {
+        assert_eq!(detect_provider("gpt-image-2"), Some(Provider::Gpt));
+        assert_eq!(
+            detect_provider("byte-plus-seedream-4-5"),
+            Some(Provider::Seedream)
+        );
+        assert_eq!(
+            detect_provider("Qwen3-Embedding-0.6B"),
+            Some(Provider::Qwen)
+        );
     }
 
     #[test]

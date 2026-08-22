@@ -7,10 +7,37 @@ interface Props {
   channels: ChannelStatus[];
 }
 
-function statusDot(channel: ChannelStatus) {
-  if (channel.status === "degraded") return "bg-amber-500";
-  if (channel.online || channel.status === "operational") return "bg-emerald-500";
-  return "bg-red-500";
+function statusVisual(channel: ChannelStatus, t: (key: string) => string) {
+  if (channel.status === "degraded") {
+    return {
+      dot: "bg-amber-500",
+      label: t("card.degraded"),
+      badge: "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300",
+    };
+  }
+  if (channel.online || channel.status === "operational") {
+    return {
+      dot: "bg-emerald-500",
+      label: t("card.normal"),
+      badge: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300",
+    };
+  }
+  if (channel.status === "failed") {
+    return {
+      dot: "bg-red-500",
+      label: t("card.failed"),
+      badge: "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300",
+    };
+  }
+  return {
+    dot: "bg-gray-400",
+    label: t("status.unchecked"),
+    badge: "bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300",
+  };
+}
+
+function formatRatio(value: number) {
+  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(6).replace(/0+$/, "");
 }
 
 function quotaColor(pct: number) {
@@ -20,9 +47,22 @@ function quotaColor(pct: number) {
 }
 
 function availColor(pct: number) {
-  if (pct >= 95) return { bar: "bg-emerald-500", text: "text-emerald-600 dark:text-emerald-400" };
-  if (pct >= 80) return { bar: "bg-amber-500", text: "text-amber-600 dark:text-amber-400" };
-  return { bar: "bg-red-500", text: "text-red-600 dark:text-red-400" };
+  if (pct >= 95) {
+    return {
+      stroke: "#10b981",
+      badge: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300",
+    };
+  }
+  if (pct >= 80) {
+    return {
+      stroke: "#f59e0b",
+      badge: "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300",
+    };
+  }
+  return {
+    stroke: "#ef4444",
+    badge: "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300",
+  };
 }
 
 function formatReset(iso: string) {
@@ -44,63 +84,79 @@ function formatBalance(item: ChannelBalance) {
   return `${amount} ${currency}`;
 }
 
-/** 成功率迷你趋势线：逐时数据（近 24h）；仅 1 个点时画平线（数据刚产生） */
+/** 成功率趋势线：固定使用 0~100% 纵轴，每段按该点成功率显示绿/黄/红。 */
 function Sparkline({ points }: { points: TrendPoint[] }) {
-  const vs = points.map((p) => Math.min(100, Math.max(0, p.v)));
-  if (vs.length === 1) vs.push(vs[0]);
-  const w = 92;
-  const h = 24;
-  const pad = 2;
-  const min = Math.min(...vs);
-  const max = Math.max(...vs);
-  const x = (i: number) => pad + (i / (vs.length - 1)) * (w - 2 * pad);
-  const y = (v: number) => h - pad - ((v - min) / (max - min || 1)) * (h - 2 * pad);
-  const d = vs
-    .map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`)
-    .join(" ");
-  const last = vs[vs.length - 1];
-  const stroke = last >= 95 ? "#10b981" : last >= 80 ? "#f59e0b" : "#ef4444";
-  const first = points[0];
-  const lastP = points[points.length - 1];
+  const ordered = [...points]
+    .filter((point) => Number.isFinite(point.v))
+    .sort((a, b) => a.t.localeCompare(b.t));
+  const unique = [...new Map(ordered.map((point) => [point.t, point])).values()];
+  const plotted = unique.length === 1 ? [unique[0], { ...unique[0], t: `${unique[0].t} ` }] : unique;
+  if (plotted.length === 0) return null;
+
+  const w = 240;
+  const h = 34;
+  const pad = 3;
+  const x = (i: number) => pad + (i / (plotted.length - 1)) * (w - 2 * pad);
+  const y = (value: number) => h - pad - (Math.min(100, Math.max(0, value)) / 100) * (h - 2 * pad);
+  const first = unique[0];
+  const lastP = unique[unique.length - 1];
+  const last = Math.min(100, Math.max(0, lastP.v));
   const hhmm = (iso: string) => (iso.length >= 16 ? iso.slice(11, 16) : iso);
   const title =
-    points.length === 1
+    unique.length === 1
       ? `${hhmm(first.t)} · ${Math.round(first.v)}%`
       : `${hhmm(first.t)} → ${hhmm(lastP.t)} · ${Math.round(first.v)}% → ${Math.round(last)}%`;
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="shrink-0" aria-hidden>
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      className="h-8 min-w-24 flex-1"
+      aria-hidden
+    >
       <title>{title}</title>
-      <path
-        d={d}
-        fill="none"
-        stroke={stroke}
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-        strokeLinecap="round"
+      {plotted.slice(1).map((point, index) => {
+        const previous = plotted[index];
+        return (
+          <line
+            key={`${previous.t}-${point.t}-${index}`}
+            x1={x(index)}
+            y1={y(previous.v)}
+            x2={x(index + 1)}
+            y2={y(point.v)}
+            stroke={availColor(point.v).stroke}
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        );
+      })}
+      <circle
+        cx={x(plotted.length - 1)}
+        cy={y(last)}
+        r="2.2"
+        fill={availColor(last).stroke}
+        vectorEffect="non-scaling-stroke"
       />
     </svg>
   );
 }
 
-function AvailabilityBar({ value, trend }: { value: number; trend?: TrendPoint[] | null }) {
+function AvailabilityTrend({ value, trend }: { value: number; trend?: TrendPoint[] | null }) {
   const { t } = useI18n();
   const pct = Math.min(100, Math.max(0, value <= 1 ? value * 100 : value));
   const color = availColor(pct);
+  const points = trend && trend.length > 0 ? trend : [{ t: "", v: pct }];
+  const trendKey = points.map((point) => `${point.t}:${point.v}`).join("|");
   return (
-    <div className="mt-1.5 flex items-center gap-1.5 text-[11px]">
-      <span className="w-16 shrink-0 truncate text-gray-500 dark:text-gray-400">
-        {t("list.successRate")}
-      </span>
-      <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
-        <div
-          className={`h-full rounded-full transition-all ${color.bar}`}
-          style={{ width: `${pct}%` }}
-        />
+    <div className="mt-1.5 flex items-center gap-2 pl-4 text-[11px]">
+      <div className="flex w-24 shrink-0 items-center gap-1.5">
+        <span className="text-gray-500 dark:text-gray-400">{t("list.successRate")}</span>
+        <span className={`rounded px-1.5 py-0.5 font-semibold ${color.badge}`}>
+          {Math.round(pct)}%
+        </span>
       </div>
-      <span className={`w-8 shrink-0 text-right font-medium ${color.text}`}>
-        {Math.round(pct)}%
-      </span>
-      {trend && trend.length > 0 && <Sparkline points={trend} />}
+      <Sparkline key={trendKey} points={points} />
     </div>
   );
 }
@@ -167,15 +223,19 @@ export default function ChannelList({ channels }: Props) {
       {channels.map((channel, index) => {
         const provider = channelProvider(channel);
         const balances = channel.balances ?? [];
+        const status = statusVisual(channel, t);
         return (
           <li
             key={`${channel.name}-${channel.model ?? ""}-${index}`}
             className="rounded border border-gray-100 bg-gray-50 px-2 py-1.5 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-800/60 dark:text-gray-200"
           >
             <div className="flex items-center gap-2">
-              <i className={`h-2 w-2 shrink-0 rounded-full ${statusDot(channel)}`} />
+              <i className={`h-2 w-2 shrink-0 rounded-full ${status.dot}`} />
               {provider && <ProviderIcon provider={provider} size={14} />}
               <span className="min-w-0 truncate font-medium">{channel.name}</span>
+              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${status.badge}`}>
+                {status.label}
+              </span>
               {channel.plan_level && (
                 <span className="shrink-0 rounded bg-gray-200 px-1.5 py-0.5 text-[10px] text-gray-600 dark:bg-gray-700 dark:text-gray-300">
                   {channel.plan_level}
@@ -185,8 +245,14 @@ export default function ChannelList({ channels }: Props) {
             {channel.detail && (
               <p className="mt-0.5 pl-4 text-xs leading-5 text-gray-400">{channel.detail}</p>
             )}
+            <div className="mt-1 flex flex-wrap gap-1 pl-4 text-[10px] text-gray-500 dark:text-gray-400">
+              <span className="rounded bg-gray-200 px-1.5 py-0.5 dark:bg-gray-700">
+                {t("list.modelRatio")}{" "}
+                {channel.model_ratio == null ? "--" : `${formatRatio(channel.model_ratio)}x`}
+              </span>
+            </div>
             {channel.availability != null && (
-              <AvailabilityBar value={channel.availability} trend={channel.trend} />
+              <AvailabilityTrend value={channel.availability} trend={channel.trend} />
             )}
             <QuotaBars tiers={channel.tiers ?? []} />
             {balances.length > 0 && (

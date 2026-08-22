@@ -1,6 +1,6 @@
 import type { ChannelStatus, MonitorModels, ProviderId } from "../types";
 
-export const PROVIDERS: ProviderId[] = ["gpt", "claude", "grok", "kimi", "gemini"];
+export const PROVIDERS: ProviderId[] = ["gpt", "claude", "grok", "kimi", "gemini", "qwen", "seedream"];
 
 const PROVIDER_ALIASES: Record<string, ProviderId> = {
   openai: "gpt",
@@ -9,6 +9,10 @@ const PROVIDER_ALIASES: Record<string, ProviderId> = {
   xai: "grok",
   moonshot: "kimi",
   google: "gemini",
+  alibaba: "qwen",
+  dashscope: "qwen",
+  bytedance: "seedream",
+  volcengine: "seedream",
 };
 
 const copyModels = (m: MonitorModels): MonitorModels => ({
@@ -17,6 +21,8 @@ const copyModels = (m: MonitorModels): MonitorModels => ({
   grok: [...m.grok],
   kimi: [...m.kimi],
   gemini: [...m.gemini],
+  qwen: [...(m.qwen ?? DEFAULT_MODELS.qwen)],
+  seedream: [...(m.seedream ?? DEFAULT_MODELS.seedream)],
 });
 
 export const DEFAULT_MODELS: MonitorModels = {
@@ -25,6 +31,8 @@ export const DEFAULT_MODELS: MonitorModels = {
   grok: ["grok-4.6"],
   kimi: ["kimi-k3"],
   gemini: ["gemini-2.5-pro", "gemini-2.5-flash"],
+  qwen: ["Qwen/Qwen3-Embedding-0.6B"],
+  seedream: ["byte-plus-seedream-4-5"],
 };
 
 export const PROVIDER_META: Record<
@@ -36,6 +44,8 @@ export const PROVIDER_META: Record<
   grok: { label: "Grok", vendor: "xai", color: "#111827" },
   kimi: { label: "Kimi", vendor: "moonshot", color: "#3b82f6" },
   gemini: { label: "Gemini", vendor: "google", color: "#8b5cf6" },
+  qwen: { label: "Qwen", vendor: "alibaba", color: "#615ced" },
+  seedream: { label: "Seedream", vendor: "bytedance", color: "#ec4899" },
 };
 
 export function normalizeModels(models?: MonitorModels | null): MonitorModels {
@@ -53,6 +63,7 @@ export function availabilityPct(value: number | null | undefined): number | null
 export function detectProvider(text: string): ProviderId | null {
   const raw = text.toLowerCase();
   const n = raw.replace(/[./_:]/g, "-");
+  if (isNonChatModel(n)) return null;
   if (
     n.includes("claude") ||
     n.includes("sonnet") ||
@@ -65,6 +76,8 @@ export function detectProvider(text: string): ProviderId | null {
   if (n.includes("grok") || raw.includes("xai")) return "grok";
   if (n.includes("kimi") || n.includes("moonshot")) return "kimi";
   if (n.includes("gemini") || raw.includes("google")) return "gemini";
+  if (n.includes("qwen") || raw.includes("dashscope") || raw.includes("alibaba")) return "qwen";
+  if (n.includes("seedream") || raw.includes("volcengine") || raw.includes("bytedance")) return "seedream";
   if (
     n.includes("gpt") ||
     n.includes("chatgpt") ||
@@ -74,6 +87,16 @@ export function detectProvider(text: string): ProviderId | null {
     return "gpt";
   }
   return null;
+}
+
+export function isNonChatModel(text: string): boolean {
+  const n = text.toLowerCase().replace(/[./_:]/g, "-");
+  return [
+    "dall-e",
+    "dalle",
+    "imagen",
+    "nano-banana",
+  ].some((marker) => n.includes(marker));
 }
 
 export function channelProvider(channel: ChannelStatus): ProviderId | null {

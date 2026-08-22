@@ -6,6 +6,7 @@ import {
   DEFAULT_MODELS,
   detectProvider,
   filterChannels,
+  isNonChatModel,
   normalizeModels,
 } from "./models";
 import type { ChannelStatus } from "../types";
@@ -32,6 +33,8 @@ describe("detectProvider", () => {
     expect(detectProvider("grok-4.6")).toBe("grok");
     expect(detectProvider("kimi-k3")).toBe("kimi");
     expect(detectProvider("gemini-2.5-pro")).toBe("gemini");
+    expect(detectProvider("Qwen/Qwen3-Embedding-0.6B")).toBe("qwen");
+    expect(detectProvider("byte-plus-seedream-4-5")).toBe("seedream");
   });
 
   it("识别厂商别名与系列词", () => {
@@ -52,6 +55,13 @@ describe("detectProvider", () => {
   it("非模型文本返回 null", () => {
     expect(detectProvider("deepseek-v3")).toBeNull();
     expect(detectProvider("random relay group")).toBeNull();
+  });
+
+  it("gpt-image、Qwen 向量模型与 Seedream 分别归入对应系列", () => {
+    expect(isNonChatModel("gpt-image-2")).toBe(false);
+    expect(detectProvider("gpt-image-2")).toBe("gpt");
+    expect(detectProvider("byte-plus-seedream-4-5")).toBe("seedream");
+    expect(detectProvider("Qwen/Qwen3-Embedding-0.6B")).toBe("qwen");
   });
 });
 
@@ -128,6 +138,8 @@ describe("normalizeModels", () => {
       grok: [],
       kimi: [],
       gemini: [],
+      qwen: [],
+      seedream: [],
     });
     expect(next).toEqual(DEFAULT_MODELS);
   });
@@ -139,6 +151,8 @@ describe("normalizeModels", () => {
       grok: [],
       kimi: [],
       gemini: [],
+      qwen: [],
+      seedream: [],
     });
     expect(next.gpt).toEqual(["gpt-x"]);
     expect(next.claude).toEqual([]);

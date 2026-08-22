@@ -4,8 +4,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::state::SiteResult;
+
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 /// 结果文件位置：config_path() 的父目录下的 last-results.json（config_path 可能是相对路径，直接用）
 fn results_path() -> Result<PathBuf, String> {
@@ -30,6 +33,9 @@ pub fn load() -> HashMap<String, SiteResult> {
 
 /// 紧凑 JSON 原子写入：先写 last-results.json.tmp，再 rename 覆盖目标文件
 pub fn save(map: &HashMap<String, SiteResult>) -> Result<(), String> {
+    let _guard = SAVE_LOCK
+        .lock()
+        .map_err(|_| "结果保存锁已损坏".to_string())?;
     let path = results_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建结果目录失败: {e}"))?;

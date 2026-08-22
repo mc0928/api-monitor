@@ -1,23 +1,33 @@
+use std::collections::HashMap;
+
 use reqwest::Client;
 use serde_json::Value;
 
-use crate::config::SiteConfig;
+use crate::config::{MonitorModels, SiteConfig};
 use crate::http::truncate;
-use crate::models::{detect_provider, format_channel_detail, sort_by_success_rate, Provider};
+use crate::models::{
+    detect_provider, format_channel_detail, is_non_chat_model, normalize_model,
+    sort_by_success_rate, Provider,
+};
 use crate::state::{
-    now_secs, AppState, ChannelBalance, ChannelStatus, QuotaTier, SiteResult, TokenCache,
-    TrendPoint,
+    now_millis, now_secs, AppState, ChannelBalance, ChannelStatus, QuotaTier, SiteResult,
+    TokenCache, TrendPoint,
 };
 
 /// sub2api 站点采集：确保登录态 -> 拉取渠道监控列表；401 时清缓存重登一次
-pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> SiteResult {
+pub async fn check(
+    client: &Client,
+    site: &SiteConfig,
+    monitor: &MonitorModels,
+    state: &AppState,
+) -> SiteResult {
     let mut token = match ensure_token(client, site, state).await {
         Ok(t) => t,
         Err(e) => return SiteResult::error(site, e),
     };
 
     let base = site.base_url.trim_end_matches('/');
-    let url = format!("{base}/api/v1/channel-monitors");
+    let url = format!("{base}/api/v1/channel-monitors?_ts={}", now_millis());
 
     let (status, body) = match fetch_monitors(client, &url, &token.auth_token).await {
         Ok(r) => r,
@@ -44,6 +54,14 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
         return SiteResult::error(site, "channel-monitors 返回 401，令牌已失效".to_string());
     }
 
+    // 倍率接口与监控数据互不依赖，提前并发请求，避免额外串行等待。
+    let rates_client = client.clone();
+    let rates_base = base.to_string();
+    let rates_token = token.auth_token.clone();
+    let group_rates_h = tauri::async_runtime::spawn(async move {
+        fetch_group_rates(&rates_client, &rates_base, &rates_token).await
+    });
+
     let mut result = SiteResult::base(site, true, None);
     let mut channels: Vec<ChannelStatus> = Vec::new();
     // 主动监控接口不可用（如被动模式站点返回 403 模式不匹配、旧版本 404）时不直接报错，
@@ -55,7 +73,7 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
             Ok(v) => v,
             Err(e) => return SiteResult::error(site, format!("响应不是合法 JSON: {e}")),
         };
-        channels = rank_channels(parse_channels(&value));
+        channels = rank_channels(filter_monitored_channels(parse_channels(&value), monitor));
         // 字段结构未最终确定前，保留原始响应片段便于调试（调试开关关闭时由 lib.rs 剥离）
         result.raw = Some(truncate(&body, 2000));
     } else {
@@ -66,10 +84,17 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
     if channels.is_empty() {
         if let Ok(v2) = fetch_v2_matrix(client, base, &token.auth_token).await {
             if !v2.is_empty() {
-                channels = rank_channels(v2);
+                channels = rank_channels(filter_monitored_channels(v2, monitor));
             }
         }
     }
+
+    let group_rates = group_rates_h
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    apply_group_rates(&mut channels, &group_rates);
 
     result.balance_usd = site_balance_from_channels(&channels).or(token.balance);
     result.channels = channels;
@@ -84,6 +109,37 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
     result
 }
 
+fn filter_monitored_channels(
+    channels: Vec<ChannelStatus>,
+    monitor: &MonitorModels,
+) -> Vec<ChannelStatus> {
+    let wanted = monitor.all_names();
+    channels
+        .into_iter()
+        .filter(|channel| {
+            if let Some(model) = channel.model.as_deref() {
+                if is_non_chat_model(model) {
+                    return false;
+                }
+                let normalized = normalize_model(model);
+                return wanted
+                    .iter()
+                    .any(|item| normalize_model(item) == normalized);
+            }
+            match channel.provider.as_deref().and_then(Provider::from_id) {
+                Some(Provider::Gpt) => !monitor.gpt.is_empty(),
+                Some(Provider::Claude) => !monitor.claude.is_empty(),
+                Some(Provider::Grok) => !monitor.grok.is_empty(),
+                Some(Provider::Kimi) => !monitor.kimi.is_empty(),
+                Some(Provider::Gemini) => !monitor.gemini.is_empty(),
+                Some(Provider::Qwen) => !monitor.qwen.is_empty(),
+                Some(Provider::Seedream) => !monitor.seedream.is_empty(),
+                None => false,
+            }
+        })
+        .collect()
+}
+
 /// V2 被动监控：按分组聚合的成功率/错误率/首 Token 延迟
 /// GET /api/v1/channel-monitor-v2/matrix?range=24h
 async fn fetch_v2_matrix(
@@ -91,15 +147,18 @@ async fn fetch_v2_matrix(
     base: &str,
     token: &str,
 ) -> Result<Vec<ChannelStatus>, String> {
-    let url = format!("{base}/api/v1/channel-monitor-v2/matrix?range=24h");
-    let (status, body) = crate::http::authorized_get(client, &url, Some(token), None, None, 1)
+    let url = format!(
+        "{base}/api/v1/channel-monitor-v2/matrix?range=24h&_ts={}",
+        now_millis()
+    );
+    let (status, body) = crate::http::authorized_get(client, &url, Some(token), None, None)
         .await
         .map_err(|e| format!("V2 监控请求失败: {e}"))?;
     if !(200..300).contains(&status) {
         return Err(format!("HTTP {status}"));
     }
-    let value: Value = serde_json::from_str(&body)
-        .map_err(|e| format!("V2 监控响应不是合法 JSON: {e}"))?;
+    let value: Value =
+        serde_json::from_str(&body).map_err(|e| format!("V2 监控响应不是合法 JSON: {e}"))?;
     Ok(parse_v2_matrix(&value))
 }
 
@@ -162,15 +221,130 @@ fn parse_v2_matrix(value: &Value) -> Vec<ChannelStatus> {
                 latency_ms,
                 tiers: Vec::new(),
                 balances: Vec::new(),
+                model_ratio: None,
                 trend,
             }
         })
         .collect()
 }
 
-/// 拉取渠道监控列表（共用 GET，带一次传输层重试）
+/// 拉取渠道监控列表。交互刷新快速失败，下一分钟会自动重试。
 async fn fetch_monitors(client: &Client, url: &str, token: &str) -> Result<(u16, String), String> {
-    crate::http::authorized_get(client, url, Some(token), None, None, 1).await
+    crate::http::authorized_get(client, url, Some(token), None, None).await
+}
+
+/// 用户可访问分组的倍率。用户级覆盖（/groups/rates）优先于分组默认倍率。
+async fn fetch_group_rates(
+    client: &Client,
+    base: &str,
+    token: &str,
+) -> Result<HashMap<String, f64>, String> {
+    let request_id = now_millis();
+    let available_url = format!("{base}/api/v1/groups/available?_ts={request_id}");
+    let rates_url = format!("{base}/api/v1/groups/rates?_ts={request_id}");
+    let available_client = client.clone();
+    let available_token = token.to_string();
+    let available_h = tauri::async_runtime::spawn(async move {
+        crate::http::authorized_get(
+            &available_client,
+            &available_url,
+            Some(&available_token),
+            None,
+            None,
+        )
+        .await
+    });
+    let overrides_client = client.clone();
+    let overrides_token = token.to_string();
+    let overrides_h = tauri::async_runtime::spawn(async move {
+        crate::http::authorized_get(
+            &overrides_client,
+            &rates_url,
+            Some(&overrides_token),
+            None,
+            None,
+        )
+        .await
+    });
+
+    let (status, body) = available_h
+        .await
+        .map_err(|e| format!("分组倍率任务失败: {e}"))?
+        .map_err(|e| format!("分组倍率请求失败: {e}"))?;
+    if !(200..300).contains(&status) {
+        return Err(format!("分组倍率请求返回 HTTP {status}"));
+    }
+    let available: Value =
+        serde_json::from_str(&body).map_err(|e| format!("分组倍率响应不是合法 JSON: {e}"))?;
+    let overrides = overrides_h
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .filter(|(status, _)| (200..300).contains(status))
+        .and_then(|(_, body)| serde_json::from_str::<Value>(&body).ok())
+        .unwrap_or(Value::Null);
+    Ok(parse_group_rates(&available, &overrides))
+}
+
+fn parse_group_rates(available: &Value, overrides: &Value) -> HashMap<String, f64> {
+    let override_data = overrides.get("data").unwrap_or(overrides);
+    let mut rates = HashMap::new();
+    for group in extract_items(available) {
+        let Some(name) = group.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let id = group.get("id").and_then(as_string);
+        let overridden = id
+            .as_deref()
+            .and_then(|id| override_data.get(id))
+            .and_then(as_number);
+        if let Some(rate) = overridden.or_else(|| pick_number(&group, "rate_multiplier")) {
+            rates.insert(normalize_group_name(name), rate);
+        }
+    }
+    rates
+}
+
+fn normalize_group_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn simplified_group_name(name: &str) -> String {
+    let mut depth = 0_u32;
+    let without_notes: String = normalize_group_name(name)
+        .chars()
+        .filter(|c| match c {
+            '(' | '（' => {
+                depth += 1;
+                false
+            }
+            ')' | '）' => {
+                depth = depth.saturating_sub(1);
+                false
+            }
+            _ => depth == 0,
+        })
+        .collect();
+    // 部分站点修改了分组显示名，但旧监控仍保留 free/version 等描述。
+    without_notes.replace("free", "")
+}
+
+fn apply_group_rates(channels: &mut [ChannelStatus], rates: &HashMap<String, f64>) {
+    for channel in channels {
+        let exact = rates.get(&normalize_group_name(&channel.name)).copied();
+        channel.model_ratio = exact.or_else(|| {
+            let wanted = simplified_group_name(&channel.name);
+            let mut matches = rates
+                .iter()
+                .filter(|(name, _)| simplified_group_name(name) == wanted)
+                .map(|(_, rate)| *rate);
+            let first = matches.next()?;
+            matches.next().is_none().then_some(first)
+        });
+    }
 }
 
 /// 站点级余额：优先取 USD，否则取渠道余额合计（同币种才汇总）
@@ -257,8 +431,8 @@ async fn login(
         ));
     }
 
-    let value: Value = serde_json::from_str(&body)
-        .map_err(|e| format!("登录响应不是合法 JSON: {e}"))?;
+    let value: Value =
+        serde_json::from_str(&body).map_err(|e| format!("登录响应不是合法 JSON: {e}"))?;
     parse_token(&value).ok_or_else(|| "登录响应中未找到 auth_token".to_string())
 }
 
@@ -267,7 +441,10 @@ async fn refresh_token(
     site: &SiteConfig,
     refresh: &str,
 ) -> Result<TokenCache, String> {
-    let url = format!("{}/api/v1/auth/refresh", site.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/api/v1/auth/refresh",
+        site.base_url.trim_end_matches('/')
+    );
     let payload = serde_json::json!({ "refresh_token": refresh });
 
     let response = client
@@ -280,8 +457,8 @@ async fn refresh_token(
         return Err("refresh 失败".to_string());
     }
     let body = response.text().await.unwrap_or_default();
-    let value: Value = serde_json::from_str(&body)
-        .map_err(|e| format!("refresh 响应不是合法 JSON: {e}"))?;
+    let value: Value =
+        serde_json::from_str(&body).map_err(|e| format!("refresh 响应不是合法 JSON: {e}"))?;
     parse_token(&value).ok_or_else(|| "refresh 响应中未找到 auth_token".to_string())
 }
 
@@ -322,10 +499,7 @@ fn parse_token(value: &Value) -> Option<TokenCache> {
 /// 宽松解析渠道列表：数组可能在顶层 / data / data.items / channels 下。
 /// 对齐 sub2api UserMonitorView：primary_status + latest_quota。
 fn parse_channels(value: &Value) -> Vec<ChannelStatus> {
-    extract_items(value)
-        .iter()
-        .map(parse_channel)
-        .collect()
+    extract_items(value).iter().map(parse_channel).collect()
 }
 
 fn extract_items(value: &Value) -> Vec<Value> {
@@ -347,10 +521,18 @@ fn extract_items(value: &Value) -> Vec<Value> {
 }
 
 fn parse_channel(item: &Value) -> ChannelStatus {
-    let name = ["group_name", "name", "channel_name", "title", "channel", "primary_model", "id"]
-        .iter()
-        .find_map(|k| item.get(*k).and_then(as_string).filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| "未知渠道".to_string());
+    let name = [
+        "group_name",
+        "name",
+        "channel_name",
+        "title",
+        "channel",
+        "primary_model",
+        "id",
+    ]
+    .iter()
+    .find_map(|k| item.get(*k).and_then(as_string).filter(|s| !s.is_empty()))
+    .unwrap_or_else(|| "未知渠道".to_string());
 
     let metrics = item.get("primary_metrics");
     let (online, status) = parse_status(item);
@@ -380,7 +562,8 @@ fn parse_channel(item: &Value) -> ChannelStatus {
         .iter()
         .find_map(|k| item.get(*k).and_then(|v| v.as_str()))
         .filter(|s| !s.is_empty());
-    let mut detail = format_channel_detail(model.as_deref().unwrap_or(""), latency_ms, availability);
+    let mut detail =
+        format_channel_detail(model.as_deref().unwrap_or(""), latency_ms, availability);
     if let Some(r) = remark {
         if !detail.is_empty() {
             detail.push_str(" · ");
@@ -408,7 +591,16 @@ fn parse_channel(item: &Value) -> ChannelStatus {
                 .collect()
         })
         .unwrap_or_default();
-    trend.reverse();
+    // 不依赖接口返回顺序；同一时间点保留最后一条，确保刷新后最新点立即替换旧点。
+    trend.sort_by(|a, b| a.t.cmp(&b.t));
+    trend.dedup_by(|a, b| {
+        if a.t == b.t {
+            a.v = b.v;
+            true
+        } else {
+            false
+        }
+    });
 
     ChannelStatus {
         name,
@@ -422,6 +614,7 @@ fn parse_channel(item: &Value) -> ChannelStatus {
         latency_ms,
         tiers,
         balances,
+        model_ratio: None,
         trend: (!trend.is_empty()).then_some(trend),
     }
 }
@@ -441,8 +634,8 @@ fn parse_status(item: &Value) -> (bool, String) {
 
     match raw {
         Some(Value::String(s)) => match s.to_lowercase().as_str() {
-            "operational" | "online" | "up" | "active" | "enabled" | "ok" | "healthy"
-            | "true" | "1" | "success" => (true, "operational".into()),
+            "operational" | "online" | "up" | "active" | "enabled" | "ok" | "healthy" | "true"
+            | "1" | "success" => (true, "operational".into()),
             "degraded" | "warning" | "warn" | "slow" => (true, "degraded".into()),
             "failed" | "error" | "offline" | "down" | "disabled" | "false" | "0" => {
                 (false, "failed".into())
@@ -799,5 +992,67 @@ mod tests {
         assert_eq!(gpt.provider.as_deref(), Some("gpt"));
         assert_eq!(gpt.latency_ms, Some(10000));
         assert_eq!(gpt.detail, "10000ms · 24.8%");
+    }
+
+    #[test]
+    fn monitored_filter_requires_exact_chat_model() {
+        let json = serde_json::json!([
+            { "name": "chat", "provider": "openai", "primary_model": "gpt-5.6-sol", "primary_status": "operational" },
+            { "name": "compact", "provider": "openai", "primary_model": "gpt-5.6-sol-openai-compact", "primary_status": "operational" },
+            { "name": "image", "provider": "openai", "primary_model": "gpt-image-2", "primary_status": "operational" }
+        ]);
+        let filtered = filter_monitored_channels(parse_channels(&json), &MonitorModels::default());
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "chat");
+        assert_eq!(filtered[0].model_ratio, None);
+    }
+
+    #[test]
+    fn group_rates_use_user_override_and_normalized_name() {
+        let groups = serde_json::json!({
+            "data": [
+                { "id": 9, "name": "GPT 稳定分组 ", "rate_multiplier": 0.08 },
+                { "id": 18, "name": "Grok free", "rate_multiplier": 0.04 }
+            ]
+        });
+        let overrides = serde_json::json!({ "data": { "9": 0.06 } });
+        let rates = parse_group_rates(&groups, &overrides);
+        assert_eq!(rates.get("gpt稳定分组"), Some(&0.06));
+        assert_eq!(rates.get("grokfree"), Some(&0.04));
+
+        let mut channels = parse_v2_matrix(&serde_json::json!({
+            "data": { "items": [{
+                "platform": "openai",
+                "group_name": "GPT 稳定分组",
+                "metrics": { "success_rate": 1.0, "ttft": {} },
+                "health": { "overall": "healthy" }
+            }] }
+        }));
+        apply_group_rates(&mut channels, &rates);
+        assert_eq!(channels[0].model_ratio, Some(0.06));
+    }
+
+    #[test]
+    fn group_rates_match_stale_monitor_labels_without_guessing_ambiguous_groups() {
+        let rates = HashMap::from([
+            (normalize_group_name("Codex｜pro稳定分组"), 0.20),
+            (
+                normalize_group_name("grok|gork free分组（支持grok4.6,上下文500k ）"),
+                0.05,
+            ),
+        ]);
+        let mut channels = vec![
+            parse_channel(&serde_json::json!({
+                "group_name": "Codex｜pro稳定分组 (无限制无视封号警告可随意破限)",
+                "primary_model": "gpt-5.6-sol"
+            })),
+            parse_channel(&serde_json::json!({
+                "group_name": "grok|gork分组（支持grok4.5,上下文500k ）",
+                "primary_model": "grok-4.5"
+            })),
+        ];
+        apply_group_rates(&mut channels, &rates);
+        assert_eq!(channels[0].model_ratio, Some(0.20));
+        assert_eq!(channels[1].model_ratio, Some(0.05));
     }
 }
