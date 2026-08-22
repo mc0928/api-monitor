@@ -60,6 +60,10 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
     let parsed = parse_channels(&value);
     result.balance_usd = site_balance_from_channels(&parsed).or(token.balance);
     result.channels = rank_channels(parsed);
+    if result.channels.is_empty() {
+        // 站点正常响应但列表为空：通常该账号在网站上还没配置渠道监控
+        result.note = Some("站点未返回渠道监控，请确认已在网站上添加".to_string());
+    }
     // 字段结构未最终确定前，保留原始响应片段便于调试（调试开关关闭时由 lib.rs 剥离）
     result.raw = Some(truncate(&body, 2000));
     result
