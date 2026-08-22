@@ -44,9 +44,10 @@ function formatBalance(item: ChannelBalance) {
   return `${amount} ${currency}`;
 }
 
-/** 成功率迷你趋势线：V2 被动监控的逐时桶数据（近 24h） */
+/** 成功率迷你趋势线：逐时数据（近 24h）；仅 1 个点时画平线（数据刚产生） */
 function Sparkline({ points }: { points: TrendPoint[] }) {
   const vs = points.map((p) => Math.min(100, Math.max(0, p.v)));
+  if (vs.length === 1) vs.push(vs[0]);
   const w = 92;
   const h = 24;
   const pad = 2;
@@ -62,11 +63,13 @@ function Sparkline({ points }: { points: TrendPoint[] }) {
   const first = points[0];
   const lastP = points[points.length - 1];
   const hhmm = (iso: string) => (iso.length >= 16 ? iso.slice(11, 16) : iso);
+  const title =
+    points.length === 1
+      ? `${hhmm(first.t)} · ${Math.round(first.v)}%`
+      : `${hhmm(first.t)} → ${hhmm(lastP.t)} · ${Math.round(first.v)}% → ${Math.round(last)}%`;
   return (
     <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="shrink-0" aria-hidden>
-      <title>
-        {hhmm(first.t)} → {hhmm(lastP.t)} · {Math.round(first.v)}% → {Math.round(last)}%
-      </title>
+      <title>{title}</title>
       <path
         d={d}
         fill="none"
@@ -97,7 +100,7 @@ function AvailabilityBar({ value, trend }: { value: number; trend?: TrendPoint[]
       <span className={`w-8 shrink-0 text-right font-medium ${color.text}`}>
         {Math.round(pct)}%
       </span>
-      {trend && trend.length >= 2 && <Sparkline points={trend} />}
+      {trend && trend.length > 0 && <Sparkline points={trend} />}
     </div>
   );
 }

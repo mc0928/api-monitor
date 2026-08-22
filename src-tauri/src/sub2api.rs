@@ -43,36 +43,44 @@ pub async fn check(client: &Client, site: &SiteConfig, state: &AppState) -> Site
         state.clear_token(&site.id);
         return SiteResult::error(site, "channel-monitors 返回 401，令牌已失效".to_string());
     }
-    if !(200..300).contains(&status) {
-        return SiteResult::error(
-            site,
-            format!("HTTP {status}：{}", truncate(body.trim(), 200)),
-        );
-    }
-
-    let value: Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
-        Err(e) => return SiteResult::error(site, format!("响应不是合法 JSON: {e}")),
-    };
 
     let mut result = SiteResult::base(site, true, None);
-    let parsed = parse_channels(&value);
-    result.balance_usd = site_balance_from_channels(&parsed).or(token.balance);
-    result.channels = rank_channels(parsed);
-    // 渠道监控列表为空时，回退到 V2 被动监控（部分站点数据只在此接口）
-    if result.channels.is_empty() {
+    let mut channels: Vec<ChannelStatus> = Vec::new();
+    // 主动监控接口不可用（如被动模式站点返回 403 模式不匹配、旧版本 404）时不直接报错，
+    // 记录原因后继续尝试 V2 被动监控——不同站点部署的监控形式可能不同
+    let mut active_error: Option<String> = None;
+
+    if (200..300).contains(&status) {
+        let value: Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(e) => return SiteResult::error(site, format!("响应不是合法 JSON: {e}")),
+        };
+        channels = rank_channels(parse_channels(&value));
+        // 字段结构未最终确定前，保留原始响应片段便于调试（调试开关关闭时由 lib.rs 剥离）
+        result.raw = Some(truncate(&body, 2000));
+    } else {
+        active_error = Some(format!("HTTP {status}：{}", truncate(body.trim(), 200)));
+    }
+
+    // 主动监控无数据或不可用时，回退到 V2 被动监控（部分站点数据只在此接口）
+    if channels.is_empty() {
         if let Ok(v2) = fetch_v2_matrix(client, base, &token.auth_token).await {
             if !v2.is_empty() {
-                result.channels = rank_channels(v2);
+                channels = rank_channels(v2);
             }
         }
     }
+
+    result.balance_usd = site_balance_from_channels(&channels).or(token.balance);
+    result.channels = channels;
     if result.channels.is_empty() {
-        // 站点正常响应但列表为空：通常该账号在网站上还没配置渠道监控
-        result.note = Some("站点未返回渠道监控，请确认已在网站上添加".to_string());
+        result.note = Some(match active_error {
+            Some(err) => format!(
+                "渠道监控接口不可用（{err}），且 V2 被动监控无数据；该站点可能使用了不兼容的监控模式或未开启监控"
+            ),
+            None => "站点未返回渠道监控，请确认已在网站上添加".to_string(),
+        });
     }
-    // 字段结构未最终确定前，保留原始响应片段便于调试（调试开关关闭时由 lib.rs 剥离）
-    result.raw = Some(truncate(&body, 2000));
     result
 }
 
@@ -139,7 +147,7 @@ fn parse_v2_matrix(value: &Value) -> Vec<ChannelStatus> {
                     })
                     .collect::<Vec<_>>()
             });
-            let trend = trend.filter(|t| t.len() >= 2);
+            let trend = trend.filter(|t| !t.is_empty());
             ChannelStatus {
                 name,
                 online,
@@ -414,7 +422,7 @@ fn parse_channel(item: &Value) -> ChannelStatus {
         latency_ms,
         tiers,
         balances,
-        trend: (trend.len() >= 2).then_some(trend),
+        trend: (!trend.is_empty()).then_some(trend),
     }
 }
 
@@ -711,6 +719,23 @@ mod tests {
         assert!((trend[0].v - 65.0).abs() < f64::EPSILON);
         assert!((trend[1].v - 35.0).abs() < f64::EPSILON);
         assert!((trend[2].v - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_timeline_single_point_keeps_trend() {
+        // 新建监控只有 1 条检测记录，也应展示趋势（前端画平线）
+        let json = serde_json::json!([{
+            "name": "A",
+            "primary_status": "operational",
+            "timeline": [
+                { "status": "operational", "checked_at": "2026-08-22T08:00:00Z" }
+            ]
+        }]);
+        let channels = parse_channels(&json);
+        let trend = channels[0].trend.as_ref().expect("单点趋势应保留");
+        assert_eq!(trend.len(), 1);
+        assert_eq!(trend[0].t, "2026-08-22T08:00:00Z");
+        assert!((trend[0].v - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]

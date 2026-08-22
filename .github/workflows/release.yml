@@ -6,9 +6,19 @@ on:
 
 jobs:
   publish:
-    runs-on: windows-latest
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          - platform: macos-latest # Apple Silicon (M1 及以上)
+            args: "--target aarch64-apple-darwin"
+          - platform: macos-latest # Intel 芯片
+            args: "--target x86_64-apple-darwin"
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,6 +31,8 @@ jobs:
         run: npm ci
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -35,3 +47,4 @@ jobs:
           releaseName: "API Monitor ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
+          args: ${{ matrix.args }}

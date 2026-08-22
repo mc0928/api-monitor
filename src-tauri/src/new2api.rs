@@ -11,7 +11,7 @@ use crate::models::{
 };
 use crate::state::{ChannelStatus, SiteResult, TrendPoint};
 
-const PERF_REQ_TIMEOUT: Duration = Duration::from_secs(5);
+const PERF_REQ_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// New API 换算规则：500000 quota = $1
 const QUOTA_PER_USD: f64 = 500_000.0;
@@ -160,7 +160,8 @@ async fn fetch_group_perfs(
         return HashMap::new();
     }
 
-    const CONCURRENCY: usize = 8;
+    // 限流站点（如 prorisehub）会直接丢弃部分连接：降低并发并带一次重试
+    const CONCURRENCY: usize = 4;
     let mut perfs = HashMap::new();
     for chunk in models.chunks(CONCURRENCY) {
         let mut handles = Vec::new();
@@ -179,7 +180,7 @@ async fn fetch_group_perfs(
                     token.as_deref(),
                     user_id.as_deref(),
                     Some(PERF_REQ_TIMEOUT),
-                    0,
+                    1,
                 )
                 .await
             }));
@@ -309,7 +310,18 @@ fn collapse_group_perfs(
         .into_values()
         .filter_map(|mut items| {
             items.sort_by_key(|perf| model_preference(&perf.group, &perf.model, &wanted));
-            items.first().map(|perf| (*perf).clone())
+            let mut chosen = items.first().map(|perf| (*perf).clone())?;
+            // 首选模型可能没有 series（新分组/接口缺数据），借用同分组内最长的趋势
+            if chosen.trend.is_empty() {
+                if let Some(best) = items
+                    .iter()
+                    .filter(|p| !p.trend.is_empty())
+                    .max_by_key(|p| p.trend.len())
+                {
+                    chosen.trend = best.trend.clone();
+                }
+            }
+            Some(chosen)
         })
         .collect()
 }
@@ -346,7 +358,7 @@ fn parse_plaza_channels(
                 latency_ms,
                 tiers: Vec::new(),
                 balances: Vec::new(),
-                trend: (perf.trend.len() >= 2).then(|| perf.trend.clone()),
+                trend: (!perf.trend.is_empty()).then(|| perf.trend.clone()),
             }
         })
         .collect();
@@ -479,5 +491,69 @@ mod tests {
         assert_eq!(vip.trend.len(), 3);
         assert_eq!(vip.trend[0].t, "2026-08-21T09:00:00Z");
         assert!((vip.trend[2].v - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn single_point_series_keeps_trend() {
+        // 新分组的 series 可能只有 1 个桶，仍应展示（前端画平线）
+        let value = serde_json::json!({
+            "data": {
+                "model_name": "gpt-5.6-sol",
+                "groups": [
+                    {
+                        "group": "pro测试",
+                        "avg_latency_ms": 3341,
+                        "success_rate": 100,
+                        "series": [
+                            { "ts": 1787317200, "success_rate": 100 }
+                        ]
+                    }
+                ]
+            }
+        });
+        let mut perfs = HashMap::new();
+        merge_group_perfs(&mut perfs, &value);
+        let channels = parse_plaza_channels(&perfs, &MonitorModels::default());
+        let pro = channels.iter().find(|c| c.name == "pro测试").unwrap();
+        let trend = pro.trend.as_ref().expect("单点趋势应保留");
+        assert_eq!(trend.len(), 1);
+        assert_eq!(trend[0].t, "2026-08-21T13:00:00Z");
+    }
+
+    #[test]
+    fn collapse_falls_back_to_other_model_trend() {
+        let mut perfs = HashMap::new();
+        // 首选模型（配置中的 gpt-5.6-sol）没有 series
+        perfs.insert(
+            "vip\x1fgpt-5.6-sol".into(),
+            GroupPerf {
+                group: "vip".into(),
+                latency_ms: 2100,
+                success_rate: 96.0,
+                model: "gpt-5.6-sol".into(),
+                trend: Vec::new(),
+            },
+        );
+        // 同分组的其他模型带有趋势，应被借用
+        perfs.insert(
+            "vip\x1fgpt-5.4".into(),
+            GroupPerf {
+                group: "vip".into(),
+                latency_ms: 1800,
+                success_rate: 98.0,
+                model: "gpt-5.4".into(),
+                trend: vec![
+                    TrendPoint { t: "2026-08-21T09:00:00Z".into(), v: 99.0 },
+                    TrendPoint { t: "2026-08-21T10:00:00Z".into(), v: 97.0 },
+                ],
+            },
+        );
+        let channels = parse_plaza_channels(&perfs, &MonitorModels::default());
+        assert_eq!(channels.len(), 1);
+        // 展示的仍是首选模型的指标
+        assert_eq!(channels[0].model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(channels[0].detail, "gpt-5.6-sol · 2100ms · 96.0%");
+        let trend = channels[0].trend.as_ref().expect("应借用同分组其他模型的趋势");
+        assert_eq!(trend.len(), 2);
     }
 }

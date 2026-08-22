@@ -6,3 +6,4 @@ config/*
 !config/sites.example.json
 # 本地工具（如便携版 gh CLI）
 .tools/
+.tmp/
