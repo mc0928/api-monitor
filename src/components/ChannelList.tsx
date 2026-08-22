@@ -1,29 +1,11 @@
 import { channelProvider } from "../lib/models";
+import { useI18n } from "../lib/i18n";
 import type { ChannelBalance, ChannelStatus, QuotaTier } from "../types";
 import { ProviderIcon } from "./ProviderIcons";
 
 interface Props {
   channels: ChannelStatus[];
 }
-
-const WINDOW_LABELS: Record<string, string> = {
-  "5h": "5小时",
-  "7d": "7天",
-  "7d-sonnet": "7天 Sonnet",
-  "7d-fable": "7天 Fable",
-  weekly: "每周",
-  daily: "每日",
-  "30d": "30天",
-  total: "总计",
-};
-
-const TIER_LABELS: Record<string, string> = {
-  requests: "请求",
-  tokens: "Token",
-  shared: "共享",
-  pro: "Pro",
-  flash: "Flash",
-};
 
 function statusDot(channel: ChannelStatus) {
   if (channel.status === "degraded") return "bg-amber-500";
@@ -32,23 +14,22 @@ function statusDot(channel: ChannelStatus) {
 }
 
 function quotaColor(pct: number) {
-  if (pct >= 90) return { bar: "bg-red-500", text: "text-red-600" };
-  if (pct >= 75) return { bar: "bg-amber-500", text: "text-amber-600" };
-  return { bar: "bg-emerald-500", text: "text-emerald-600" };
+  if (pct >= 90) return { bar: "bg-red-500", text: "text-red-600 dark:text-red-400" };
+  if (pct >= 75) return { bar: "bg-amber-500", text: "text-amber-600 dark:text-amber-400" };
+  return { bar: "bg-emerald-500", text: "text-emerald-600 dark:text-emerald-400" };
 }
 
-function tierLabel(tier: QuotaTier) {
-  const window = WINDOW_LABELS[tier.window] ?? tier.window;
-  if (!tier.label) return window;
-  const extra = TIER_LABELS[tier.label] ?? tier.label;
-  return `${extra}/${window}`;
+function availColor(pct: number) {
+  if (pct >= 95) return { bar: "bg-emerald-500", text: "text-emerald-600 dark:text-emerald-400" };
+  if (pct >= 80) return { bar: "bg-amber-500", text: "text-amber-600 dark:text-amber-400" };
+  return { bar: "bg-red-500", text: "text-red-600 dark:text-red-400" };
 }
 
 function formatReset(iso: string) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   const diff = date.getTime() - Date.now();
-  if (diff <= 0) return "即将重置";
+  if (diff <= 0) return "";
   if (diff < 3_600_000) return `${Math.max(1, Math.round(diff / 60_000))}m`;
   const hours = Math.round(diff / 3_600_000);
   if (hours < 48) return `${hours}h`;
@@ -63,19 +44,16 @@ function formatBalance(item: ChannelBalance) {
   return `${amount} ${currency}`;
 }
 
-function availColor(pct: number) {
-  if (pct >= 95) return { bar: "bg-emerald-500", text: "text-emerald-600" };
-  if (pct >= 80) return { bar: "bg-amber-500", text: "text-amber-600" };
-  return { bar: "bg-red-500", text: "text-red-600" };
-}
-
 function AvailabilityBar({ value }: { value: number }) {
+  const { t } = useI18n();
   const pct = Math.min(100, Math.max(0, value <= 1 ? value * 100 : value));
   const color = availColor(pct);
   return (
     <div className="mt-1.5 flex items-center gap-1.5 text-[11px]">
-      <span className="w-16 shrink-0 truncate text-gray-500">成功率</span>
-      <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-200">
+      <span className="w-16 shrink-0 truncate text-gray-500 dark:text-gray-400">
+        {t("list.successRate")}
+      </span>
+      <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
         <div
           className={`h-full rounded-full transition-all ${color.bar}`}
           style={{ width: `${pct}%` }}
@@ -89,7 +67,16 @@ function AvailabilityBar({ value }: { value: number }) {
 }
 
 function QuotaBars({ tiers }: { tiers: QuotaTier[] }) {
+  const { t } = useI18n();
   if (tiers.length === 0) return null;
+
+  const tierLabel = (tier: QuotaTier) => {
+    const window = t(`list.window.${tier.window}`);
+    if (!tier.label) return window;
+    const extra = t(`list.tier.${tier.label}`);
+    return `${extra}/${window}`;
+  };
+
   return (
     <div className="mt-1.5 space-y-1">
       {tiers.map((tier, index) => {
@@ -100,10 +87,13 @@ function QuotaBars({ tiers }: { tiers: QuotaTier[] }) {
             key={`${tier.window}-${tier.label ?? ""}-${index}`}
             className="flex items-center gap-1.5 text-[11px]"
           >
-            <span className="w-16 shrink-0 truncate text-gray-500" title={tierLabel(tier)}>
+            <span
+              className="w-16 shrink-0 truncate text-gray-500 dark:text-gray-400"
+              title={tierLabel(tier)}
+            >
               {tierLabel(tier)}
             </span>
-            <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-200">
+            <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
               <div
                 className={`h-full rounded-full transition-all ${color.bar}`}
                 style={{ width: `${pct}%` }}
@@ -113,7 +103,10 @@ function QuotaBars({ tiers }: { tiers: QuotaTier[] }) {
               {Math.round(pct)}%
             </span>
             {tier.reset_at && (
-              <span className="w-10 shrink-0 truncate text-gray-400" title={tier.reset_at}>
+              <span
+                className="w-10 shrink-0 truncate text-gray-400"
+                title={`${t("list.resetSoon")} ${tier.reset_at}`}
+              >
                 {formatReset(tier.reset_at)}
               </span>
             )}
@@ -125,8 +118,9 @@ function QuotaBars({ tiers }: { tiers: QuotaTier[] }) {
 }
 
 export default function ChannelList({ channels }: Props) {
+  const { t } = useI18n();
   if (channels.length === 0) {
-    return <p className="text-sm text-gray-400">未解析到渠道数据</p>;
+    return <p className="text-sm text-gray-400">{t("list.noData")}</p>;
   }
 
   return (
@@ -135,40 +129,42 @@ export default function ChannelList({ channels }: Props) {
         const provider = channelProvider(channel);
         const balances = channel.balances ?? [];
         return (
-        <li
-          key={`${channel.name}-${index}`}
-          className="rounded border border-gray-100 bg-gray-50 px-2 py-1.5 text-sm text-gray-700"
-        >
-          <div className="flex items-center gap-2">
-            <i className={`h-2 w-2 shrink-0 rounded-full ${statusDot(channel)}`} />
-            {provider && <ProviderIcon provider={provider} size={14} />}
-            <span className="min-w-0 truncate font-medium">{channel.name}</span>
-            {channel.plan_level && (
-              <span className="shrink-0 rounded bg-gray-200 px-1.5 py-0.5 text-[10px] text-gray-600">
-                {channel.plan_level}
-              </span>
-            )}
-          </div>
-          {channel.detail && (
-            <p className="mt-0.5 pl-4 text-xs leading-5 text-gray-400">{channel.detail}</p>
-          )}
-          {channel.availability != null && (
-            <AvailabilityBar value={channel.availability} />
-          )}
-          <QuotaBars tiers={channel.tiers ?? []} />
-          {balances.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-x-2 text-[11px]">
-              {balances.map((item) => (
-                <span
-                  key={`${item.currency}-${item.balance}`}
-                  className={item.balance <= 0 ? "font-medium text-red-600" : "text-gray-600"}
-                >
-                  余额 {formatBalance(item)}
+          <li
+            key={`${channel.name}-${channel.model ?? ""}-${index}`}
+            className="rounded border border-gray-100 bg-gray-50 px-2 py-1.5 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-800/60 dark:text-gray-200"
+          >
+            <div className="flex items-center gap-2">
+              <i className={`h-2 w-2 shrink-0 rounded-full ${statusDot(channel)}`} />
+              {provider && <ProviderIcon provider={provider} size={14} />}
+              <span className="min-w-0 truncate font-medium">{channel.name}</span>
+              {channel.plan_level && (
+                <span className="shrink-0 rounded bg-gray-200 px-1.5 py-0.5 text-[10px] text-gray-600 dark:bg-gray-700 dark:text-gray-300">
+                  {channel.plan_level}
                 </span>
-              ))}
+              )}
             </div>
-          )}
-        </li>
+            {channel.detail && (
+              <p className="mt-0.5 pl-4 text-xs leading-5 text-gray-400">{channel.detail}</p>
+            )}
+            {channel.availability != null && <AvailabilityBar value={channel.availability} />}
+            <QuotaBars tiers={channel.tiers ?? []} />
+            {balances.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-x-2 text-[11px]">
+                {balances.map((item, index) => (
+                  <span
+                    key={`${item.currency}-${index}`}
+                    className={
+                      item.balance <= 0
+                        ? "font-medium text-red-600 dark:text-red-400"
+                        : "text-gray-600 dark:text-gray-400"
+                    }
+                  >
+                    {t("list.balance")} {formatBalance(item)}
+                  </span>
+                ))}
+              </div>
+            )}
+          </li>
         );
       })}
     </ul>

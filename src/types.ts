@@ -8,6 +8,8 @@ export interface SiteConfig {
   vpn: boolean;
   /** new2api：个人访问令牌 */
   token?: string | null;
+  /** new2api：New-Api-User 请求头；不填则后端不发该头 */
+  user_id?: string | null;
   /** sub2api：登录账号（邮箱） */
   username?: string | null;
   /** sub2api：登录密码 */
@@ -27,10 +29,19 @@ export interface MonitorConfig {
   models: MonitorModels;
 }
 
+export interface RefreshConfig {
+  /** 自动刷新间隔（分钟）：0=关闭，可选 0/5/10/30，默认 5（读取处防御式 ?? 5） */
+  interval_minutes: number;
+}
+
 export interface AppConfig {
   proxy: { url: string };
   sites: SiteConfig[];
   monitor: MonitorConfig;
+  /** 自动刷新（缺省时按 interval_minutes=5 处理） */
+  refresh?: RefreshConfig;
+  /** 调试模式：false 时后端会剥离 raw 字段（读取处防御式 ?? false） */
+  debug?: boolean;
 }
 
 export interface QuotaTier {

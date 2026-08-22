@@ -1,10 +1,8 @@
 import { useEffect, useState } from "react";
 import { getConfig, saveConfig, testProxy } from "../lib/api";
-import {
-  PROVIDER_META,
-  PROVIDERS,
-  normalizeModels,
-} from "../lib/models";
+import { errMsg } from "../lib/errors";
+import { useI18n } from "../lib/i18n";
+import { PROVIDER_META, PROVIDERS, normalizeModels } from "../lib/models";
 import type { AppConfig, ProviderId, SiteConfig, SiteType } from "../types";
 import { ProviderIcon } from "./ProviderIcons";
 
@@ -16,7 +14,11 @@ interface Props {
 }
 
 const inputClass =
-  "w-full rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100";
+  "w-full rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:focus:ring-blue-900";
+
+/** 自动刷新间隔选项：0 = 关闭
+ */
+const INTERVAL_OPTIONS = [0, 5, 10, 30];
 
 function newSite(): SiteConfig {
   return {
@@ -29,6 +31,7 @@ function newSite(): SiteConfig {
 }
 
 export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props) {
+  const { t } = useI18n();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [site, setSite] = useState<SiteConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -36,6 +39,7 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
   const [saving, setSaving] = useState(false);
 
   const models = config ? normalizeModels(config.monitor?.models) : null;
+  const intervalMinutes = config?.refresh?.interval_minutes ?? 5;
 
   useEffect(() => {
     getConfig()
@@ -44,7 +48,7 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
         if (mode === "edit") {
           const found = cfg.sites.find((s) => s.id === siteId);
           if (!found) {
-            setError("未找到该渠道");
+            setError(t("dialog.notFound"));
             return;
           }
           setSite({ ...found });
@@ -54,7 +58,8 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
           setSite(null);
         }
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(errMsg(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, siteId]);
 
   const patchSite = (patch: Partial<SiteConfig>) => {
@@ -62,11 +67,11 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
   };
 
   const handleTestProxy = async () => {
-    setProxyTip("测试中…");
+    setProxyTip(t("dialog.testing"));
     try {
       setProxyTip(await testProxy());
     } catch (e) {
-      setProxyTip(String(e));
+      setProxyTip(errMsg(e));
     }
   };
 
@@ -74,7 +79,7 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
     if (!config || !models) return;
     if (mode !== "settings") {
       if (!site || !site.name.trim() || !site.base_url.trim()) {
-        setError("请填写名称和地址");
+        setError(t("dialog.needNameUrl"));
         return;
       }
     }
@@ -94,7 +99,7 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
       await saveConfig(next);
       onSaved(next, mode === "settings" ? "all" : site!.id);
     } catch (e) {
-      setError(String(e));
+      setError(errMsg(e));
     } finally {
       setSaving(false);
     }
@@ -120,7 +125,7 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
       await saveConfig(next);
       onSaved(next, "all");
     } catch (e) {
-      setError(String(e));
+      setError(errMsg(e));
     } finally {
       setSaving(false);
     }
@@ -132,31 +137,77 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
       onClick={onClose}
     >
       <div
-        className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl border border-gray-200 bg-white shadow-xl"
+        className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-900"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
-          <h2 className="font-semibold text-gray-900">
-            {mode === "add" ? "添加渠道" : mode === "settings" ? "设置" : "修改配置"}
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3 dark:border-gray-700">
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">
+            {mode === "add"
+              ? t("dialog.addTitle")
+              : mode === "settings"
+                ? t("dialog.settingsTitle")
+                : t("dialog.editTitle")}
           </h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+          >
             ✕
           </button>
         </div>
 
         <div className="space-y-6 overflow-auto px-5 py-4">
           {error && (
-            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400">
               {error}
             </div>
           )}
 
-          {!config && !error && <p className="text-gray-400">加载中…</p>}
+          {!config && !error && <p className="text-gray-400">{t("dialog.loading")}</p>}
 
           {config && (mode === "settings" || site) && (
             <>
+              {mode === "settings" && (
+                <section>
+                  <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {t("dialog.autoRefresh")}
+                  </h3>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {INTERVAL_OPTIONS.map((minutes) => (
+                      <button
+                        key={minutes}
+                        type="button"
+                        onClick={() =>
+                          setConfig({ ...config, refresh: { interval_minutes: minutes } })
+                        }
+                        className={`rounded-lg border px-3 py-1.5 text-sm transition ${
+                          intervalMinutes === minutes
+                            ? "border-blue-600 bg-blue-600 text-white"
+                            : "border-gray-300 text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+                        }`}
+                      >
+                        {minutes === 0
+                          ? t("dialog.off")
+                          : t("dialog.intervalMinutes", { n: minutes })}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="mt-3 flex cursor-pointer items-center gap-1.5 text-sm text-gray-600 dark:text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={config.debug ?? false}
+                      onChange={(e) => setConfig({ ...config, debug: e.target.checked })}
+                    />
+                    {t("dialog.debug")}
+                    <span className="text-xs text-gray-400">{t("dialog.debugHint")}</span>
+                  </label>
+                </section>
+              )}
+
               <section>
-                <h3 className="mb-2 text-sm font-medium text-gray-700">代理（Clash 混合代理）</h3>
+                <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {t("dialog.proxy")}
+                </h3>
                 <div className="flex items-center gap-2">
                   <input
                     className={inputClass}
@@ -168,9 +219,9 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
                   />
                   <button
                     onClick={handleTestProxy}
-                    className="shrink-0 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+                    className="shrink-0 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
                   >
-                    测试
+                    {t("dialog.test")}
                   </button>
                 </div>
                 {proxyTip && <p className="mt-1 text-xs text-gray-400">{proxyTip}</p>}
@@ -178,10 +229,12 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
 
               <section>
                 <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-sm font-medium text-gray-700">监控模型</h3>
+                  <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {t("dialog.monitoredModels")}
+                  </h3>
                   <button
                     type="button"
-                    className="text-xs text-gray-400 hover:text-gray-600"
+                    className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
                     onClick={() =>
                       setConfig({
                         ...config,
@@ -189,12 +242,10 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
                       })
                     }
                   >
-                    恢复默认
+                    {t("dialog.resetDefaults")}
                   </button>
                 </div>
-                <p className="mb-2 text-xs text-gray-400">
-                  列表展示渠道状态；筛选和 new2api 成功率优先按这些模型归类
-                </p>
+                <p className="mb-2 text-xs text-gray-400">{t("dialog.modelsHint")}</p>
                 <div className="space-y-3">
                   {PROVIDERS.map((id) => (
                     <ModelChips
@@ -208,95 +259,112 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
               </section>
 
               {site && (
-              <section>
-                <h3 className="mb-2 text-sm font-medium text-gray-700">渠道</h3>
-                <div className="grid grid-cols-2 gap-2">
-                  <input
-                    className={inputClass}
-                    value={site.name}
-                    placeholder="名称"
-                    onChange={(e) => patchSite({ name: e.target.value })}
-                  />
-                  <select
-                    className={inputClass}
-                    value={site.type}
-                    onChange={(e) => patchSite({ type: e.target.value as SiteType })}
-                  >
-                    <option value="new2api">new2api（令牌查余额）</option>
-                    <option value="sub2api">sub2api（登录拉渠道）</option>
-                  </select>
-                  <input
-                    className={`${inputClass} col-span-2`}
-                    value={site.base_url}
-                    placeholder="https://example.com"
-                    onChange={(e) => patchSite({ base_url: e.target.value })}
-                  />
-
-                  {site.type === "new2api" && (
+                <section>
+                  <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {t("dialog.channel")}
+                  </h3>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      className={inputClass}
+                      value={site.name}
+                      placeholder={t("dialog.name")}
+                      onChange={(e) => patchSite({ name: e.target.value })}
+                    />
+                    <select
+                      className={inputClass}
+                      value={site.type}
+                      onChange={(e) => patchSite({ type: e.target.value as SiteType })}
+                    >
+                      <option value="new2api">{t("dialog.typeNew2api")}</option>
+                      <option value="sub2api">{t("dialog.typeSub2api")}</option>
+                    </select>
                     <input
                       className={`${inputClass} col-span-2`}
-                      value={site.token ?? ""}
-                      placeholder="个人访问令牌"
-                      onChange={(e) => patchSite({ token: e.target.value })}
+                      value={site.base_url}
+                      placeholder="https://example.com"
+                      onChange={(e) => patchSite({ base_url: e.target.value })}
                     />
-                  )}
-                  {site.type === "sub2api" && (
-                    <>
-                      <input
-                        className={inputClass}
-                        value={site.username ?? ""}
-                        placeholder="账号（邮箱）"
-                        onChange={(e) => patchSite({ username: e.target.value })}
-                      />
-                      <input
-                        className={inputClass}
-                        type="password"
-                        value={site.password ?? ""}
-                        placeholder="密码"
-                        onChange={(e) => patchSite({ password: e.target.value })}
-                      />
-                    </>
-                  )}
-                </div>
 
-                <div className="mt-2 flex items-center gap-3 text-sm">
-                  <label className="flex cursor-pointer items-center gap-1.5 text-gray-600">
-                    <input
-                      type="checkbox"
-                      checked={site.vpn}
-                      onChange={(e) => patchSite({ vpn: e.target.checked })}
-                    />
-                    走代理（vpn）
-                  </label>
-                  {mode === "edit" && (
-                    <button
-                      onClick={handleDelete}
-                      disabled={saving}
-                      className="ml-auto text-xs text-red-500 hover:text-red-600"
-                    >
-                      删除渠道
-                    </button>
-                  )}
-                </div>
-              </section>
+                    {site.type === "new2api" && (
+                      <>
+                        <input
+                          className={`${inputClass} col-span-2`}
+                          value={site.token ?? ""}
+                          placeholder={t("dialog.token")}
+                          onChange={(e) => patchSite({ token: e.target.value })}
+                        />
+                        <p className="col-span-2 -mt-1 text-xs text-gray-400">
+                          {t("dialog.tokenHint")}
+                        </p>
+                        <input
+                          className={`${inputClass} col-span-2`}
+                          value={site.user_id ?? ""}
+                          placeholder={t("dialog.userId")}
+                          onChange={(e) => patchSite({ user_id: e.target.value })}
+                        />
+                      </>
+                    )}
+                    {site.type === "sub2api" && (
+                      <>
+                        <input
+                          className={inputClass}
+                          value={site.username ?? ""}
+                          placeholder={t("dialog.username")}
+                          onChange={(e) => patchSite({ username: e.target.value })}
+                        />
+                        <input
+                          className={inputClass}
+                          type="password"
+                          value={site.password ?? ""}
+                          placeholder={t("dialog.password")}
+                          onChange={(e) => patchSite({ password: e.target.value })}
+                        />
+                      </>
+                    )}
+                  </div>
+
+                  <div className="mt-2 flex items-center gap-3 text-sm">
+                    <label className="flex cursor-pointer items-center gap-1.5 text-gray-600 dark:text-gray-300">
+                      <input
+                        type="checkbox"
+                        checked={site.vpn}
+                        onChange={(e) => patchSite({ vpn: e.target.checked })}
+                      />
+                      {t("dialog.vpn")}
+                    </label>
+                    {mode === "edit" && (
+                      <button
+                        onClick={handleDelete}
+                        disabled={saving}
+                        className="ml-auto text-xs text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300"
+                      >
+                        {t("dialog.delete")}
+                      </button>
+                    )}
+                  </div>
+                </section>
               )}
             </>
           )}
         </div>
 
-        <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-3">
+        <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-3 dark:border-gray-700">
           <button
             onClick={onClose}
-            className="rounded-lg border border-gray-300 px-4 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+            className="rounded-lg border border-gray-300 px-4 py-1.5 text-sm text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
           >
-            取消
+            {t("dialog.cancel")}
           </button>
           <button
             onClick={handleSave}
             disabled={!config || (mode !== "settings" && !site) || saving}
             className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {saving ? "保存中…" : mode === "add" ? "添加" : "保存"}
+            {saving
+              ? t("dialog.saving")
+              : mode === "add"
+                ? t("dialog.add")
+                : t("dialog.save")}
           </button>
         </div>
       </div>
@@ -313,6 +381,7 @@ function ModelChips({
   models: string[];
   onChange: (models: string[]) => void;
 }) {
+  const { t } = useI18n();
   const [draft, setDraft] = useState("");
   const add = () => {
     const name = draft.trim();
@@ -322,7 +391,7 @@ function ModelChips({
   };
   return (
     <div>
-      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-gray-600">
+      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-gray-600 dark:text-gray-300">
         <ProviderIcon provider={provider} size={14} />
         {PROVIDER_META[provider].label}
       </div>
@@ -330,12 +399,12 @@ function ModelChips({
         {models.map((model) => (
           <span
             key={model}
-            className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-700"
+            className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-200"
           >
             {model}
             <button
               type="button"
-              className="text-gray-400 hover:text-red-500"
+              className="text-gray-400 hover:text-red-500 dark:hover:text-red-400"
               onClick={() => onChange(models.filter((m) => m !== model))}
             >
               ×
@@ -343,9 +412,9 @@ function ModelChips({
           </span>
         ))}
         <input
-          className="min-w-32 flex-1 rounded border border-gray-200 bg-white px-2 py-0.5 text-xs outline-none focus:border-blue-400"
+          className="min-w-32 flex-1 rounded border border-gray-200 bg-white px-2 py-0.5 text-xs outline-none focus:border-blue-400 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
           value={draft}
-          placeholder="添加模型名，回车"
+          placeholder={t("dialog.addModelHint")}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {

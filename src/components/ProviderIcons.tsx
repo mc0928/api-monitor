@@ -5,6 +5,11 @@ import { PROVIDER_META } from "../lib/models";
 // 官方品牌图标路径：OpenAI / Claude / Kimi 取自 Simple Icons（CC0），Grok 取自 lobe-icons（MIT）。
 // 各商标权利归各自厂商所有，此处仅作指代用途。
 
+// Grok 官方色接近纯黑，暗色背景下换浅灰（CSS 类优先级高于 fill 属性）
+const FILL_CLASS: Partial<Record<ProviderId, string>> = {
+  grok: "fill-gray-900 dark:fill-gray-200",
+};
+
 function BrandSvg({
   provider,
   size,
@@ -20,6 +25,7 @@ function BrandSvg({
       height={size}
       viewBox="0 0 24 24"
       fill={PROVIDER_META[provider].color}
+      className={FILL_CLASS[provider]}
       aria-hidden
     >
       {children}
