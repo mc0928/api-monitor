@@ -224,14 +224,17 @@ export default function App() {
     return { total: sites.length, ok, fail: checked.length - ok, unchecked: sites.length - checked.length };
   }, [config, results]);
 
+  // 手动排序：直接按配置顺序展示；自动：按（筛选后的）最佳成功率降序
+  const sortBy = config?.sort_by ?? "auto";
   const rankedSites = useMemo(() => {
     const sites = config?.sites ?? [];
+    if (sortBy === "manual") return sites;
     return [...sites].sort((a, b) => {
       const score = (id: string) =>
         bestAvailability(filterChannels(results[id]?.channels ?? [], provider));
       return score(b.id) - score(a.id);
     });
-  }, [config, results, provider]);
+  }, [config, results, provider, sortBy]);
 
   return (
     <div className="min-h-screen">
@@ -295,7 +298,9 @@ export default function App() {
         </div>
         <div className="mx-auto flex max-w-5xl items-center gap-3 px-6 pb-3">
           <ProviderFilter value={provider} onChange={setProvider} />
-          <span className="text-xs text-gray-400">{t("filter.rankHint")}</span>
+          <span className="text-xs text-gray-400">
+            {sortBy === "manual" ? t("filter.manualOrderHint") : t("filter.rankHint")}
+          </span>
         </div>
       </header>
 

@@ -106,6 +106,7 @@ cargo test            # 后端解析逻辑单元测试（src-tauri 目录下）
 - `sites[].token`：new2api 个人访问令牌（个人设置 → 系统访问令牌）；**可选**，留空仅拉取公开的模型广场性能数据
 - `sites[].user_id`：new2api 可选用户 ID，新版 new-api 鉴权需要 `New-Api-User` 请求头
 - `refresh.interval_minutes`：自动刷新间隔（0 = 关闭，可选 0 / 5 / 10 / 30）
+- `sort_by`：卡片排序，`auto` 按成功率 / `manual` 按配置顺序（设置中可拖动调整）
 - `debug`：调试模式，结果中保留原始响应片段
 
 配置文件查找顺序：当前工作目录 → exe 所在目录逐级向上，取第一个已存在的 `config/sites.json`，这样无论从项目根目录还是直接双击 exe 启动，都能定位到同一份配置。

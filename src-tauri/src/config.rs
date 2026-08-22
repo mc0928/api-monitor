@@ -129,6 +129,20 @@ pub struct MonitorConfig {
     pub models: MonitorModels,
 }
 
+/// 卡片排序方式：auto（按成功率自动）/ manual（按配置顺序，设置里可拖动调整）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortBy {
+    Auto,
+    Manual,
+}
+
+impl Default for SortBy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -142,6 +156,8 @@ pub struct AppConfig {
     /// 调试模式：结果中保留原始响应片段（raw 字段）
     #[serde(default)]
     pub debug: bool,
+    #[serde(default)]
+    pub sort_by: SortBy,
 }
 
 /// 配置文件位置：config/sites.json

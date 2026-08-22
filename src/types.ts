@@ -43,6 +43,8 @@ export interface AppConfig {
   refresh?: RefreshConfig;
   /** 调试模式：false 时后端会剥离 raw 字段（读取处防御式 ?? false） */
   debug?: boolean;
+  /** 卡片排序：auto 按成功率 / manual 按配置顺序（缺省 auto） */
+  sort_by?: "auto" | "manual";
 }
 
 export interface QuotaTier {

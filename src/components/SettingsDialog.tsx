@@ -1,4 +1,16 @@
 import { useEffect, useState } from "react";
+import {
+  DndContext,
+  closestCenter,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { getConfig, saveConfig, testProxy } from "../lib/api";
 import { errMsg } from "../lib/errors";
 import { useI18n } from "../lib/i18n";
@@ -204,6 +216,39 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
                 </section>
               )}
 
+              {mode === "settings" && (
+                <section>
+                  <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {t("dialog.cardSort")}
+                  </h3>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {(["auto", "manual"] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setConfig({ ...config, sort_by: mode })}
+                        className={`rounded-lg border px-3 py-1.5 text-sm transition ${
+                          (config.sort_by ?? "auto") === mode
+                            ? "border-blue-600 bg-blue-600 text-white"
+                            : "border-gray-300 text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+                        }`}
+                      >
+                        {mode === "auto" ? t("dialog.sortAuto") : t("dialog.sortManual")}
+                      </button>
+                    ))}
+                  </div>
+                  {(config.sort_by ?? "auto") === "manual" && (
+                    <>
+                      <p className="mb-2 mt-3 text-xs text-gray-400">{t("dialog.sortHint")}</p>
+                      <SiteSortList
+                        sites={config.sites}
+                        onChange={(sites) => setConfig({ ...config, sites })}
+                      />
+                    </>
+                  )}
+                </section>
+              )}
+
               <section>
                 <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
                   {t("dialog.proxy")}
@@ -369,6 +414,76 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
         </div>
       </div>
     </div>
+  );
+}
+
+/** 手动排序模式下的站点列表：按住 ⠿ 拖动调整顺序（dnd-kit，同 cc-switch 方案） */
+function SortableSiteRow({ site, index }: { site: SiteConfig; index: number }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
+    useSortable({ id: site.id });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
+        isDragging
+          ? "z-10 border-blue-400 bg-white shadow-lg dark:bg-gray-800"
+          : "border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800/60"
+      }`}
+    >
+      <button
+        ref={setActivatorNodeRef}
+        type="button"
+        className="cursor-grab touch-none text-gray-400 hover:text-gray-600 active:cursor-grabbing dark:hover:text-gray-200"
+        {...attributes}
+        {...listeners}
+      >
+        ⠿
+      </button>
+      <span className="w-5 text-center text-xs text-gray-400">{index + 1}</span>
+      <span className="min-w-0 flex-1 truncate font-medium text-gray-800 dark:text-gray-100">
+        {site.name || site.id}
+      </span>
+      <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500 dark:bg-gray-700 dark:text-gray-400">
+        {site.type}
+      </span>
+      {site.vpn && (
+        <span className="rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950/40 dark:text-blue-400">
+          vpn
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SiteSortList({
+  sites,
+  onChange,
+}: {
+  sites: SiteConfig[];
+  onChange: (sites: SiteConfig[]) => void;
+}) {
+  const onDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIndex = sites.findIndex((s) => s.id === active.id);
+    const newIndex = sites.findIndex((s) => s.id === over.id);
+    if (oldIndex < 0 || newIndex < 0) return;
+    onChange(arrayMove(sites, oldIndex, newIndex));
+  };
+  return (
+    <DndContext collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+      <SortableContext
+        items={sites.map((s) => s.id)}
+        strategy={verticalListSortingStrategy}
+      >
+        <div className="space-y-1.5">
+          {sites.map((site, i) => (
+            <SortableSiteRow key={site.id} site={site} index={i} />
+          ))}
+        </div>
+      </SortableContext>
+    </DndContext>
   );
 }
 

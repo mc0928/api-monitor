@@ -106,6 +106,7 @@ The config file is `config/sites.json`, created automatically the first time you
 - `sites[].token`: new2api personal access token (personal settings → system access token); **optional** — leave empty to fetch only the public model-plaza performance data
 - `sites[].user_id`: optional new2api user ID for the `New-Api-User` request header required by newer new-api versions
 - `refresh.interval_minutes`: auto-refresh interval (0 = off; allowed 0 / 5 / 10 / 30)
+- `sort_by`: card order, `auto` by success rate / `manual` by config order (drag to reorder in Settings)
 - `debug`: debug mode, keeps raw response fragments in results
 
 Config lookup order: current working directory → walk up from the exe directory, using the first existing `config/sites.json`. This way the same config is found whether you launch from the project root or by double-clicking the built exe.

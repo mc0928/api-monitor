@@ -15,6 +15,7 @@
     "interval_minutes": 5
   },
   "debug": false,
+  "sort_by": "auto",
   "sites": [
     {
       "id": "site-xxx",
