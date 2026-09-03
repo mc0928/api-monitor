@@ -18,7 +18,11 @@ pub fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
         .connect_timeout(CONNECT_TIMEOUT)
         .pool_max_idle_per_host(8)
         .tcp_nodelay(true)
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) api-monitor/0.1");
+        // 版本号取自 Cargo.toml，避免发版后忘记同步
+        .user_agent(format!(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) api-monitor/{}",
+            env!("CARGO_PKG_VERSION")
+        ));
     if let Some(url) = proxy_url.map(str::trim).filter(|u| !u.is_empty()) {
         let proxy = reqwest::Proxy::all(url).map_err(|e| format!("代理地址无效（{url}）: {e}"))?;
         builder = builder.proxy(proxy);

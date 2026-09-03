@@ -35,12 +35,16 @@ pub struct TrendPoint {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelStatus {
     pub name: String,
+    /// 渠道条目的原始名称（sub2api 监控标签，常含 x0.25 等倍率与池子备注），
+    /// 仅用于倍率匹配兜底，不展示
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub online: bool,
     pub detail: String,
     /// operational | degraded | failed | unknown
     pub status: String,
     pub plan_level: Option<String>,
-    /// gpt | claude | grok | kimi | gemini | qwen | seedream
+    /// gpt | claude | grok | kimi | gemini | qwen | deepseek
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// 统一后的模型名，如 claude-sonnet-4-6
@@ -289,6 +293,7 @@ mod tests {
     fn channel(availability: f64, trend: Vec<TrendPoint>) -> ChannelStatus {
         ChannelStatus {
             name: "vip".into(),
+            label: None,
             online: true,
             detail: String::new(),
             status: "operational".into(),

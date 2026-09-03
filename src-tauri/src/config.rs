@@ -81,16 +81,16 @@ pub struct MonitorModels {
     pub gemini: Vec<String>,
     #[serde(default = "default_qwen_models")]
     pub qwen: Vec<String>,
-    #[serde(default = "default_seedream_models")]
-    pub seedream: Vec<String>,
+    #[serde(default = "default_deepseek_models")]
+    pub deepseek: Vec<String>,
 }
 
 fn default_qwen_models() -> Vec<String> {
     vec!["Qwen/Qwen3-Embedding-0.6B".into()]
 }
 
-fn default_seedream_models() -> Vec<String> {
-    vec!["byte-plus-seedream-4-5".into()]
+fn default_deepseek_models() -> Vec<String> {
+    vec!["deepseek-chat".into()]
 }
 
 impl Default for MonitorModels {
@@ -102,12 +102,26 @@ impl Default for MonitorModels {
             kimi: vec!["kimi-k3".into()],
             gemini: vec!["gemini-2.5-pro".into(), "gemini-2.5-flash".into()],
             qwen: default_qwen_models(),
-            seedream: default_seedream_models(),
+            deepseek: default_deepseek_models(),
         }
     }
 }
 
 impl MonitorModels {
+    /// 该厂商是否在监控范围内（配置了至少一个该族的模型）
+    pub fn watches(&self, provider: crate::models::Provider) -> bool {
+        let list = match provider {
+            crate::models::Provider::Gpt => &self.gpt,
+            crate::models::Provider::Claude => &self.claude,
+            crate::models::Provider::Grok => &self.grok,
+            crate::models::Provider::Kimi => &self.kimi,
+            crate::models::Provider::Gemini => &self.gemini,
+            crate::models::Provider::Qwen => &self.qwen,
+            crate::models::Provider::Deepseek => &self.deepseek,
+        };
+        !list.is_empty()
+    }
+
     fn is_empty(&self) -> bool {
         self.gpt.is_empty()
             && self.claude.is_empty()
@@ -115,7 +129,7 @@ impl MonitorModels {
             && self.kimi.is_empty()
             && self.gemini.is_empty()
             && self.qwen.is_empty()
-            && self.seedream.is_empty()
+            && self.deepseek.is_empty()
     }
 
     /// 全部配置模型名（去重、去空白）；全空时回退默认
@@ -134,7 +148,7 @@ impl MonitorModels {
             .chain(&src.kimi)
             .chain(&src.gemini)
             .chain(&src.qwen)
-            .chain(&src.seedream)
+            .chain(&src.deepseek)
         {
             let trimmed = name.trim();
             if !trimmed.is_empty() && !names.iter().any(|n| n == trimmed) {

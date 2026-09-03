@@ -34,7 +34,7 @@ describe("detectProvider", () => {
     expect(detectProvider("kimi-k3")).toBe("kimi");
     expect(detectProvider("gemini-2.5-pro")).toBe("gemini");
     expect(detectProvider("Qwen/Qwen3-Embedding-0.6B")).toBe("qwen");
-    expect(detectProvider("byte-plus-seedream-4-5")).toBe("seedream");
+    expect(detectProvider("deepseek-chat")).toBe("deepseek");
   });
 
   it("识别厂商别名与系列词", () => {
@@ -53,14 +53,13 @@ describe("detectProvider", () => {
   });
 
   it("非模型文本返回 null", () => {
-    expect(detectProvider("deepseek-v3")).toBeNull();
     expect(detectProvider("random relay group")).toBeNull();
   });
 
-  it("gpt-image、Qwen 向量模型与 Seedream 分别归入对应系列", () => {
+  it("gpt-image、Qwen 向量模型与 DeepSeek 分别归入对应系列", () => {
     expect(isNonChatModel("gpt-image-2")).toBe(false);
     expect(detectProvider("gpt-image-2")).toBe("gpt");
-    expect(detectProvider("byte-plus-seedream-4-5")).toBe("seedream");
+    expect(detectProvider("deepseek-v3")).toBe("deepseek");
     expect(detectProvider("Qwen/Qwen3-Embedding-0.6B")).toBe("qwen");
   });
 });
@@ -91,6 +90,18 @@ describe("channelProvider", () => {
     expect(channelProvider(channel({ provider: "xai" }))).toBe("grok");
     expect(channelProvider(channel({ provider: "moonshot" }))).toBe("kimi");
     expect(channelProvider(channel({ provider: "google" }))).toBe("gemini");
+  });
+
+  it("provider 字段只是兼容口径时按模型名归类", () => {
+    expect(
+      channelProvider(
+        channel({
+          name: "【DeepSeek 稳定】官方池",
+          provider: "gpt",
+          model: "deepseek-v4-flash",
+        }),
+      ),
+    ).toBe("deepseek");
   });
 
   it("无 provider 时按 model -> name -> detail 回退", () => {
@@ -139,7 +150,7 @@ describe("normalizeModels", () => {
       kimi: [],
       gemini: [],
       qwen: [],
-      seedream: [],
+      deepseek: [],
     });
     expect(next).toEqual(DEFAULT_MODELS);
   });
@@ -152,7 +163,7 @@ describe("normalizeModels", () => {
       kimi: [],
       gemini: [],
       qwen: [],
-      seedream: [],
+      deepseek: [],
     });
     expect(next.gpt).toEqual(["gpt-x"]);
     expect(next.claude).toEqual([]);

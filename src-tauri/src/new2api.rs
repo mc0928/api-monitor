@@ -404,6 +404,7 @@ fn parse_plaza_channels(
             let provider = detect_provider(&perf.model).or_else(|| detect_provider(&perf.group));
             ChannelStatus {
                 name: perf.group.clone(),
+                label: None,
                 online: status != "failed",
                 detail: format_channel_detail(&perf.model, latency_ms, availability),
                 status: status.into(),

@@ -22,7 +22,7 @@ export interface SiteConfig {
   password?: string | null;
 }
 
-export type ProviderId = "gpt" | "claude" | "grok" | "kimi" | "gemini" | "qwen" | "seedream";
+export type ProviderId = "gpt" | "claude" | "grok" | "kimi" | "gemini" | "qwen" | "deepseek";
 
 export interface MonitorModels {
   gpt: string[];
@@ -31,7 +31,7 @@ export interface MonitorModels {
   kimi: string[];
   gemini: string[];
   qwen: string[];
-  seedream: string[];
+  deepseek: string[];
 }
 
 export interface MonitorConfig {
@@ -77,12 +77,14 @@ export interface TrendPoint {
 
 export interface ChannelStatus {
   name: string;
+  /** 渠道条目的原始名称（sub2api 监控标签），仅用于倍率匹配，不展示 */
+  label?: string;
   online: boolean;
   detail: string;
   /** operational | degraded | failed | unknown */
   status: string;
   plan_level: string | null;
-  /** gpt | claude | grok | kimi | gemini | qwen | seedream */
+  /** gpt | claude | grok | kimi | gemini | qwen | deepseek */
   provider?: string | null;
   model?: string | null;
   availability: number | null;

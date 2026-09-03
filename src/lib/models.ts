@@ -1,6 +1,6 @@
 import type { ChannelStatus, MonitorModels, ProviderId } from "../types";
 
-export const PROVIDERS: ProviderId[] = ["gpt", "claude", "grok", "kimi", "gemini", "qwen", "seedream"];
+export const PROVIDERS: ProviderId[] = ["gpt", "claude", "grok", "kimi", "gemini", "qwen", "deepseek"];
 
 const PROVIDER_ALIASES: Record<string, ProviderId> = {
   openai: "gpt",
@@ -11,8 +11,6 @@ const PROVIDER_ALIASES: Record<string, ProviderId> = {
   google: "gemini",
   alibaba: "qwen",
   dashscope: "qwen",
-  bytedance: "seedream",
-  volcengine: "seedream",
 };
 
 const copyModels = (m: MonitorModels): MonitorModels => ({
@@ -22,7 +20,7 @@ const copyModels = (m: MonitorModels): MonitorModels => ({
   kimi: [...m.kimi],
   gemini: [...m.gemini],
   qwen: [...(m.qwen ?? DEFAULT_MODELS.qwen)],
-  seedream: [...(m.seedream ?? DEFAULT_MODELS.seedream)],
+  deepseek: [...(m.deepseek ?? DEFAULT_MODELS.deepseek)],
 });
 
 export const DEFAULT_MODELS: MonitorModels = {
@@ -32,20 +30,20 @@ export const DEFAULT_MODELS: MonitorModels = {
   kimi: ["kimi-k3"],
   gemini: ["gemini-2.5-pro", "gemini-2.5-flash"],
   qwen: ["Qwen/Qwen3-Embedding-0.6B"],
-  seedream: ["byte-plus-seedream-4-5"],
+  deepseek: ["deepseek-chat"],
 };
 
 export const PROVIDER_META: Record<
   ProviderId,
   { label: string; vendor: string; color: string }
 > = {
-  gpt: { label: "GPT", vendor: "openai", color: "#10a37f" },
+  gpt: { label: "GPT", vendor: "openai", color: "#111827" },
   claude: { label: "Claude", vendor: "anthropic", color: "#d97757" },
   grok: { label: "Grok", vendor: "xai", color: "#111827" },
-  kimi: { label: "Kimi", vendor: "moonshot", color: "#3b82f6" },
+  kimi: { label: "Kimi", vendor: "moonshot", color: "#111827" },
   gemini: { label: "Gemini", vendor: "google", color: "#8b5cf6" },
   qwen: { label: "Qwen", vendor: "alibaba", color: "#615ced" },
-  seedream: { label: "Seedream", vendor: "bytedance", color: "#ec4899" },
+  deepseek: { label: "DeepSeek", vendor: "deepseek", color: "#4d6bfe" },
 };
 
 export function normalizeModels(models?: MonitorModels | null): MonitorModels {
@@ -77,7 +75,7 @@ export function detectProvider(text: string): ProviderId | null {
   if (n.includes("kimi") || n.includes("moonshot")) return "kimi";
   if (n.includes("gemini") || raw.includes("google")) return "gemini";
   if (n.includes("qwen") || raw.includes("dashscope") || raw.includes("alibaba")) return "qwen";
-  if (n.includes("seedream") || raw.includes("volcengine") || raw.includes("bytedance")) return "seedream";
+  if (n.includes("deepseek")) return "deepseek";
   if (
     n.includes("gpt") ||
     n.includes("chatgpt") ||
@@ -101,13 +99,17 @@ export function isNonChatModel(text: string): boolean {
 
 export function channelProvider(channel: ChannelStatus): ProviderId | null {
   const id = channel.provider?.toLowerCase();
-  if (id) {
-    if (PROVIDERS.includes(id as ProviderId)) return id as ProviderId;
-    return PROVIDER_ALIASES[id] ?? null;
-  }
+  // provider 字段可能只是兼容口径（如 DeepSeek 渠道标成 openai），
+  // 按模型名 / 渠道名识别模型族，provider 字段仅作兜底。
+  const fromId = id
+    ? PROVIDERS.includes(id as ProviderId)
+      ? (id as ProviderId)
+      : (PROVIDER_ALIASES[id] ?? null)
+    : null;
   return (
     detectProvider(channel.model ?? "") ??
     detectProvider(channel.name) ??
+    fromId ??
     detectProvider(channel.detail)
   );
 }

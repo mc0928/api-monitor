@@ -1,4 +1,4 @@
-/// 统一监控的模型族：GPT / Claude / Grok / Kimi / Gemini
+/// 统一监控的模型族：GPT / Claude / Grok / Kimi / Gemini / Qwen / DeepSeek
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     Gpt,
@@ -7,7 +7,7 @@ pub enum Provider {
     Kimi,
     Gemini,
     Qwen,
-    Seedream,
+    Deepseek,
 }
 
 impl Provider {
@@ -19,7 +19,7 @@ impl Provider {
             Self::Kimi => "kimi",
             Self::Gemini => "gemini",
             Self::Qwen => "qwen",
-            Self::Seedream => "seedream",
+            Self::Deepseek => "deepseek",
         }
     }
 
@@ -31,7 +31,7 @@ impl Provider {
             "kimi" | "moonshot" => Some(Self::Kimi),
             "gemini" | "google" => Some(Self::Gemini),
             "qwen" | "alibaba" | "dashscope" => Some(Self::Qwen),
-            "seedream" | "bytedance" | "volcengine" => Some(Self::Seedream),
+            "deepseek" => Some(Self::Deepseek),
             _ => None,
         }
     }
@@ -88,8 +88,8 @@ pub fn detect_provider(text: &str) -> Option<Provider> {
     if n.contains("qwen") || raw.contains("dashscope") || raw.contains("alibaba") {
         return Some(Provider::Qwen);
     }
-    if n.contains("seedream") || raw.contains("volcengine") || raw.contains("bytedance") {
-        return Some(Provider::Seedream);
+    if n.contains("deepseek") {
+        return Some(Provider::Deepseek);
     }
     if n.contains("gpt")
         || n.contains("chatgpt")
@@ -103,7 +103,7 @@ pub fn detect_provider(text: &str) -> Option<Provider> {
     None
 }
 
-/// 排除当前未单独展示的图片模型族；gpt-image、Qwen 向量模型和 Seedream 会正常归类。
+/// 排除当前未单独展示的图片模型族；gpt-image、Qwen 向量模型和 DeepSeek 会正常归类。
 pub fn is_non_chat_model(text: &str) -> bool {
     let n = normalize_model(text);
     ["dall-e", "dalle", "imagen", "nano-banana"]
@@ -203,10 +203,7 @@ mod tests {
             detect_provider("Qwen/Qwen3-Embedding-0.6B"),
             Some(Provider::Qwen)
         );
-        assert_eq!(
-            detect_provider("byte-plus-seedream-4-5"),
-            Some(Provider::Seedream)
-        );
+        assert_eq!(detect_provider("deepseek-chat"), Some(Provider::Deepseek));
         assert_eq!(detect_provider("google"), Some(Provider::Gemini));
         assert_eq!(Provider::from_id("google"), Some(Provider::Gemini));
     }
@@ -214,10 +211,7 @@ mod tests {
     #[test]
     fn image_and_embedding_models_use_their_configured_families() {
         assert_eq!(detect_provider("gpt-image-2"), Some(Provider::Gpt));
-        assert_eq!(
-            detect_provider("byte-plus-seedream-4-5"),
-            Some(Provider::Seedream)
-        );
+        assert_eq!(detect_provider("deepseek-v3"), Some(Provider::Deepseek));
         assert_eq!(
             detect_provider("Qwen3-Embedding-0.6B"),
             Some(Provider::Qwen)

@@ -1,8 +1,7 @@
-use std::collections::HashMap;
-
 use base64::Engine as _;
 use reqwest::Client;
 use serde_json::Value;
+use std::collections::HashSet;
 
 use crate::config::{MonitorModels, SiteConfig};
 use crate::http::truncate;
@@ -77,7 +76,17 @@ pub async fn check(
             Ok(v) => v,
             Err(e) => return SiteResult::error(site, format!("响应不是合法 JSON: {e}")),
         };
-        channels = rank_channels(filter_monitored_channels(parse_channels(&value), monitor));
+        let parsed = parse_channels(&value);
+        channels = rank_channels(filter_monitored_channels(parsed.clone(), monitor));
+        // 站点探测模型与监控配置版本不同步时（如站点监控 grok-4.5 而配置监控 grok-4.6），
+        // 精确匹配会清空全部渠道；回退到按模型族匹配，避免整站被误判为“未返回渠道监控”
+        if channels.is_empty() && !parsed.is_empty() {
+            channels = rank_channels(filter_channels_by_family(parsed, monitor));
+            if !channels.is_empty() {
+                result.note =
+                    Some("站点探测模型与监控配置不一致，已按模型族匹配展示渠道".to_string());
+            }
+        }
         // 字段结构未最终确定前，保留原始响应片段便于调试（调试开关关闭时由 lib.rs 剥离）
         result.raw = Some(truncate(&body, 2000));
     } else {
@@ -100,7 +109,14 @@ pub async fn check(
         .unwrap_or_default();
     apply_group_rates(&mut channels, &group_rates);
 
-    result.balance_usd = site_balance_from_channels(&channels).or(token.balance);
+    // 渠道没带余额（站点未开配额探测、渠道被过滤、V2 被动监控）时，拉用户信息兜底：
+    // 浏览器登录捕获的令牌不含余额，密码登录缓存的余额也会随 refresh 响应丢失
+    result.balance_usd = match site_balance_from_channels(&channels) {
+        Some(balance) => Some(balance),
+        None => fetch_user_balance(client, base, &token.auth_token)
+            .await
+            .or(token.balance),
+    };
     result.channels = channels;
     if result.channels.is_empty() {
         result.note = Some(match active_error {
@@ -137,9 +153,37 @@ fn filter_monitored_channels(
                 Some(Provider::Kimi) => !monitor.kimi.is_empty(),
                 Some(Provider::Gemini) => !monitor.gemini.is_empty(),
                 Some(Provider::Qwen) => !monitor.qwen.is_empty(),
-                Some(Provider::Seedream) => !monitor.seedream.is_empty(),
+                Some(Provider::Deepseek) => !monitor.deepseek.is_empty(),
                 None => false,
             }
+        })
+        .collect()
+}
+
+/// 按模型族兜底匹配：渠道探测模型可识别出已监控的厂商（或渠道 provider 字段属于已监控厂商）即保留。
+/// 精确匹配全部落空时使用——渠道探测用的模型版本常与监控配置不一致，但渠道本身仍是相关厂商的。
+fn filter_channels_by_family(
+    channels: Vec<ChannelStatus>,
+    monitor: &MonitorModels,
+) -> Vec<ChannelStatus> {
+    channels
+        .into_iter()
+        .filter(|channel| {
+            if let Some(model) = channel.model.as_deref() {
+                if is_non_chat_model(model) {
+                    return false;
+                }
+                // 渠道的 provider 字段可能只是兼容口径（如 DeepSeek 渠道标成 openai），
+                // 优先按模型名识别厂商
+                if let Some(provider) = detect_provider(model) {
+                    return monitor.watches(provider);
+                }
+            }
+            channel
+                .provider
+                .as_deref()
+                .and_then(Provider::from_id)
+                .is_some_and(|provider| monitor.watches(provider))
         })
         .collect()
 }
@@ -211,15 +255,16 @@ fn parse_v2_matrix(value: &Value) -> Vec<ChannelStatus> {
                     .collect::<Vec<_>>()
             });
             let trend = trend.filter(|t| !t.is_empty());
+            // 分组名通常含模型族关键词；platform 是平台口径，DeepSeek 等渠道可能标成 openai
+            let provider = detect_provider(&name).or_else(|| Provider::from_id(platform));
             ChannelStatus {
                 name,
+                label: None,
                 online,
                 detail: format_channel_detail("", latency_ms, availability),
                 status: status.into(),
                 plan_level: None,
-                provider: Provider::from_id(platform)
-                    .map(Provider::id)
-                    .map(str::to_string),
+                provider: provider.map(Provider::id).map(str::to_string),
                 model: None,
                 availability,
                 latency_ms,
@@ -242,7 +287,7 @@ async fn fetch_group_rates(
     client: &Client,
     base: &str,
     token: &str,
-) -> Result<HashMap<String, f64>, String> {
+) -> Result<Vec<GroupRate>, String> {
     let request_id = now_millis();
     let available_url = format!("{base}/api/v1/groups/available?_ts={request_id}");
     let rates_url = format!("{base}/api/v1/groups/rates?_ts={request_id}");
@@ -290,9 +335,15 @@ async fn fetch_group_rates(
     Ok(parse_group_rates(&available, &overrides))
 }
 
-fn parse_group_rates(available: &Value, overrides: &Value) -> HashMap<String, f64> {
+/// 一个可访问分组的倍率：保留原始名，供分级匹配使用
+struct GroupRate {
+    name: String,
+    rate: f64,
+}
+
+fn parse_group_rates(available: &Value, overrides: &Value) -> Vec<GroupRate> {
     let override_data = overrides.get("data").unwrap_or(overrides);
-    let mut rates = HashMap::new();
+    let mut rates = Vec::new();
     for group in extract_items(available) {
         let Some(name) = group.get("name").and_then(|v| v.as_str()) else {
             continue;
@@ -303,7 +354,10 @@ fn parse_group_rates(available: &Value, overrides: &Value) -> HashMap<String, f6
             .and_then(|id| override_data.get(id))
             .and_then(as_number);
         if let Some(rate) = overridden.or_else(|| pick_number(&group, "rate_multiplier")) {
-            rates.insert(normalize_group_name(name), rate);
+            rates.push(GroupRate {
+                name: name.to_string(),
+                rate,
+            });
         }
     }
     rates
@@ -336,19 +390,296 @@ fn simplified_group_name(name: &str) -> String {
     without_notes.replace("free", "")
 }
 
-fn apply_group_rates(channels: &mut [ChannelStatus], rates: &HashMap<String, f64>) {
+/// 渠道分组与站点分组的显示名经常不同步（站点加后缀、改描述、整个分组改名/删除），
+/// 倍率按缺宁勿滥原则多级匹配，任一级命中即止：
+/// 1-4 渠道显示名：归一化全等 -> 去 free/括号备注后全等 -> 渠道词元全部出现在分组词元中（唯一
+///    “最贴近”者）-> 【】前缀段全等；3/4 仅在唯一候选时采用，多个并列宁缺毋滥。
+/// 5   监控标签（用户自建监控时的名称，常含池子备注）重复 1-4 级。
+/// 6-7 词元重叠兜底：显示名/标签与分组名的共享词元 ≥2 且唯一最大者才采用。
+/// 8   最后从标签里直接解析标注的倍率（x0.25 / 1倍 / 0.08）。
+fn apply_group_rates(channels: &mut [ChannelStatus], rates: &[GroupRate]) {
+    let groups: Vec<PreparedGroup> = rates
+        .iter()
+        .map(|g| PreparedGroup {
+            normalized: normalize_group_name(&g.name),
+            simplified: simplified_group_name(&g.name),
+            tokens: name_tokens(&g.name),
+            bracket: bracket_content(&g.name),
+            rate: g.rate,
+        })
+        .collect();
     for channel in channels {
-        let exact = rates.get(&normalize_group_name(&channel.name)).copied();
-        channel.model_ratio = exact.or_else(|| {
-            let wanted = simplified_group_name(&channel.name);
-            let mut matches = rates
+        channel.model_ratio =
+            match_rate_by_name(&groups, &channel.name, &name_tokens(&channel.name))
+                .or_else(|| {
+                    channel
+                        .label
+                        .as_deref()
+                        .and_then(|label| match_rate_by_name(&groups, label, &label_tokens(label)))
+                })
+                .or_else(|| match_group_by_overlap(&groups, &name_tokens(&channel.name)))
+                .or_else(|| {
+                    channel
+                        .label
+                        .as_deref()
+                        .and_then(|label| match_group_by_overlap(&groups, &label_tokens(label)))
+                })
+                .or_else(|| channel.label.as_deref().and_then(label_rate));
+    }
+}
+
+/// 对单个名称跑 1-4 级匹配；tokens 由调用方传入（标签词元需先剔除倍率标记）。
+fn match_rate_by_name(groups: &[PreparedGroup], name: &str, tokens: &[String]) -> Option<f64> {
+    let normalized = normalize_group_name(name);
+    let simplified = simplified_group_name(name);
+    let bracket = bracket_content(name);
+
+    groups
+        .iter()
+        .find(|g| g.normalized == normalized)
+        .map(|g| g.rate)
+        .or_else(|| {
+            let mut matches = groups
                 .iter()
-                .filter(|(name, _)| simplified_group_name(name) == wanted)
-                .map(|(_, rate)| *rate);
+                .filter(|g| g.simplified == simplified)
+                .map(|g| g.rate);
             let first = matches.next()?;
             matches.next().is_none().then_some(first)
-        });
+        })
+        .or_else(|| match_group_by_tokens(groups, tokens))
+        .or_else(|| match_group_by_bracket(groups, bracket.as_deref()))
+}
+
+struct PreparedGroup {
+    normalized: String,
+    simplified: String,
+    tokens: Vec<String>,
+    bracket: Option<String>,
+    rate: f64,
+}
+
+/// 词元包含匹配：渠道名词元是分组名词元的子集，且“多出部分”最短的分组唯一时采用。
+/// 不看【】段：站点改名常发生在【】内部（如【Grok 】→【Grok heavy】），交给子集+唯一性判别。
+fn match_group_by_tokens(groups: &[PreparedGroup], tokens: &[String]) -> Option<f64> {
+    if tokens.is_empty() {
+        return None;
     }
+    let mut candidates: Vec<&PreparedGroup> = groups
+        .iter()
+        .filter(|g| !g.tokens.is_empty() && tokens.iter().all(|t| g.tokens.contains(t)))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by_key(|g| extra_token_count(g, tokens));
+    if candidates.len() > 1
+        && extra_token_count(candidates[1], tokens) == extra_token_count(candidates[0], tokens)
+    {
+        return None;
+    }
+    Some(candidates[0].rate)
+}
+
+/// 【】前缀段全等匹配：站点改了分组描述但【】里的主名未变（如【DeepSeek 稳定】官方池 ↔【DeepSeek 稳定】国外版 3.5折）
+fn match_group_by_bracket(groups: &[PreparedGroup], bracket: Option<&str>) -> Option<f64> {
+    let bracket = bracket?;
+    let mut matches = groups
+        .iter()
+        .filter(|g| g.bracket.as_deref() == Some(bracket))
+        .map(|g| g.rate);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+/// 词元重叠兜底：渠道词元与分组词元的共享数 ≥2 且唯一最大时采用。
+/// 用于分组被站点改到面目全非（如【DeepSeek/GLM】友商平价 ↔【deepseek-v4 】2.5折 友商）、
+/// 子集匹配失效的场景；并列最大说明区分度不足，宁可缺失。
+/// 词元按去重后计数（如「仅Claude客户端」与【Claude Code】会重复产出 claude）。
+fn match_group_by_overlap(groups: &[PreparedGroup], tokens: &[String]) -> Option<f64> {
+    let wanted: HashSet<&String> = tokens.iter().collect();
+    let mut best: Option<(&PreparedGroup, usize)> = None;
+    let mut ambiguous = false;
+    for group in groups {
+        let seen: HashSet<&String> = group.tokens.iter().collect();
+        let shared = seen.iter().filter(|t| wanted.contains(**t)).count();
+        if shared < 2 {
+            continue;
+        }
+        match best {
+            Some((_, best_shared)) if shared == best_shared => ambiguous = true,
+            Some((_, best_shared)) if shared < best_shared => {}
+            _ => {
+                best = Some((group, shared));
+                ambiguous = false;
+            }
+        }
+    }
+    (!ambiguous).then_some(best?.0.rate)
+}
+
+/// 标签词元：剔除 x0.25 这类倍率标记词元——标签里的倍率是备注，不是分组身份的一部分
+fn label_tokens(label: &str) -> Vec<String> {
+    name_tokens(label)
+        .into_iter()
+        .filter(|token| match token.strip_prefix('x') {
+            Some(rest) => {
+                !(rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit() || c == '.'))
+            }
+            None => true,
+        })
+        .collect()
+}
+
+/// 从监控标签解析用户标注的倍率：x0.25 / ×0.25 / *1.5 前缀式优先，其次「N倍」，
+/// 最后独立小数（须带小数点且 ≤1，避免误吞模型版本号 5.6、上下文 500k 之类）。
+fn label_rate(label: &str) -> Option<f64> {
+    let lower = label.to_lowercase();
+    let chars: Vec<char> = lower.chars().collect();
+    let plausible = |rate: f64| rate > 0.0 && rate <= 100.0;
+
+    // 前缀式：x / × / * 紧跟数字
+    for (i, c) in chars.iter().enumerate() {
+        if matches!(c, 'x' | '×' | '*') {
+            if let Some((rate, _)) = parse_number_at(&chars, i + 1) {
+                if plausible(rate) {
+                    return Some(rate);
+                }
+            }
+        }
+    }
+    // 「N倍」式
+    for (i, c) in chars.iter().enumerate() {
+        if *c == '倍' {
+            let mut start = i;
+            while start > 0 && (chars[start - 1].is_ascii_digit() || chars[start - 1] == '.') {
+                start -= 1;
+            }
+            if start < i {
+                let text: String = chars[start..i].iter().collect();
+                if let Ok(rate) = text.parse::<f64>() {
+                    if plausible(rate) {
+                        return Some(rate);
+                    }
+                }
+            }
+        }
+    }
+    // 独立小数：段内仅数字和一个小数点，两端都不是字母数字，且值 ≤1
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut dots = 0;
+        while i < chars.len() && (chars[i].is_ascii_digit() || (chars[i] == '.' && dots == 0)) {
+            if chars[i] == '.' {
+                dots += 1;
+            }
+            i += 1;
+        }
+        let bounded_before = start == 0 || !chars[start - 1].is_ascii_alphanumeric();
+        let bounded_after = i == chars.len() || !chars[i].is_ascii_alphanumeric();
+        if dots == 1 && bounded_before && bounded_after {
+            let text: String = chars[start..i].iter().collect();
+            if let Ok(rate) = text.parse::<f64>() {
+                if plausible(rate) && rate <= 1.0 {
+                    return Some(rate);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 从 chars[from] 起解析一段数字（可含一个小数点），返回 (值, 结束下标)
+fn parse_number_at(chars: &[char], from: usize) -> Option<(f64, usize)> {
+    let mut i = from;
+    let mut dots = 0;
+    while i < chars.len() && (chars[i].is_ascii_digit() || (chars[i] == '.' && dots == 0)) {
+        if chars[i] == '.' {
+            dots += 1;
+        }
+        i += 1;
+    }
+    if i == from {
+        return None;
+    }
+    let text: String = chars[from..i].iter().collect();
+    text.parse::<f64>().ok().map(|v| (v, i))
+}
+
+fn extra_token_count(group: &PreparedGroup, tokens: &[String]) -> usize {
+    group.tokens.iter().filter(|t| !tokens.contains(*t)).count()
+}
+
+/// 分词：小写后按字母数字（含小数点）连续段与 CJK 连续段切分，其余字符视为分隔符。
+/// CJK 段拆成相邻二字词元：既保留「特惠」这类相邻性（子集匹配不至于过松），
+/// 又容忍个别字改动（「特惠版」仍含「特惠」）。
+fn name_tokens(name: &str) -> Vec<String> {
+    let lower = name.to_lowercase();
+    let mut parts: Vec<String> = Vec::new();
+    let mut ascii = String::new();
+    let mut cjk = String::new();
+    for c in lower.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' {
+            if !cjk.is_empty() {
+                parts.push(std::mem::take(&mut cjk));
+            }
+            ascii.push(c);
+        } else if is_cjk_token_char(c) {
+            if !ascii.is_empty() {
+                parts.push(std::mem::take(&mut ascii));
+            }
+            cjk.push(c);
+        } else if !ascii.is_empty() || !cjk.is_empty() {
+            if !ascii.is_empty() {
+                parts.push(std::mem::take(&mut ascii));
+            }
+            if !cjk.is_empty() {
+                parts.push(std::mem::take(&mut cjk));
+            }
+        }
+    }
+    if !ascii.is_empty() {
+        parts.push(ascii);
+    }
+    if !cjk.is_empty() {
+        parts.push(cjk);
+    }
+    let mut tokens = Vec::new();
+    for part in parts {
+        let chars: Vec<char> = part.chars().collect();
+        if is_cjk_token_char(chars[0]) {
+            if chars.len() >= 2 {
+                for pair in chars.windows(2) {
+                    tokens.push(pair.iter().collect::<String>());
+                }
+            }
+            // 单个汉字不成词元：单字子集匹配判别力太弱
+        } else {
+            tokens.push(part);
+        }
+    }
+    tokens
+}
+
+fn is_cjk_token_char(c: char) -> bool {
+    let u = c as u32;
+    (0x4E00..=0x9FFF).contains(&u)
+        || (0x3400..=0x4DBF).contains(&u)
+        || (0xF900..=0xFAFF).contains(&u)
+}
+
+/// 取名称里第一个【…】段的内容（去空白、小写）
+fn bracket_content(name: &str) -> Option<String> {
+    let start = name.find('【')?;
+    let rest = &name[start + '【'.len_utf8()..];
+    let end = rest.find('】')?;
+    let content = &rest[..end];
+    let normalized = normalize_group_name(content);
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 /// 站点级余额：优先取 USD，否则取渠道余额合计（同币种才汇总）
@@ -375,6 +706,36 @@ fn site_balance_from_channels(channels: &[ChannelStatus]) -> Option<f64> {
         any = true;
     }
     any.then_some(total)
+}
+
+/// 用户信息里的账户余额（USD）。不同部署的用户信息路径不同，
+/// 依次尝试 /user/profile 与 /auth/me；余额缺失或接口不可用时回退下一路径。
+async fn fetch_user_balance(client: &Client, base: &str, token: &str) -> Option<f64> {
+    for path in ["/api/v1/user/profile", "/api/v1/auth/me"] {
+        let url = format!("{base}{path}?_ts={}", now_millis());
+        let Ok((status, body)) =
+            crate::http::authorized_get(client, &url, Some(token), None, None).await
+        else {
+            continue;
+        };
+        if !(200..300).contains(&status) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&body) else {
+            continue;
+        };
+        if let Some(balance) = parse_user_balance(&value) {
+            return Some(balance);
+        }
+    }
+    None
+}
+
+/// 宽松解析账户余额：balance 可能在顶层 / data / data.user 下
+fn parse_user_balance(value: &Value) -> Option<f64> {
+    let data = value.get("data").unwrap_or(value);
+    let user = data.get("user").unwrap_or(data);
+    pick_number(user, "balance").or_else(|| pick_number(data, "balance"))
 }
 
 /// 无 token 或已过期：先 refresh，失败再 login；成功后写入缓存
@@ -565,6 +926,15 @@ fn parse_channel(item: &Value) -> ChannelStatus {
     .find_map(|k| item.get(*k).and_then(as_string).filter(|s| !s.is_empty()))
     .unwrap_or_else(|| "未知渠道".to_string());
 
+    // 监控条目的 name 是用户自建的监控标签（常含 x0.25 等倍率与池子备注），
+    // 与 group_name 不同时保留下来，供倍率匹配兜底（分组被站点改名/删除后 group_name 已对不上）
+    let label = item
+        .get("name")
+        .and_then(as_string)
+        .filter(|s| !s.is_empty())
+        .filter(|_| item.get("group_name").is_some())
+        .filter(|s| normalize_group_name(s) != normalize_group_name(&name));
+
     let metrics = item.get("primary_metrics");
     let (online, status) = parse_status(item);
     let (plan_level, tiers, balances) = parse_quota(item);
@@ -574,12 +944,17 @@ fn parse_channel(item: &Value) -> ChannelStatus {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from);
-    let provider = item
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .and_then(Provider::from_id)
-        .or_else(|| model.as_deref().and_then(detect_provider))
-        .or_else(|| detect_provider(&name));
+    // provider 字段可能只是兼容口径（如 DeepSeek 渠道标成 openai），
+    // 按模型名 / 渠道名识别模型族，provider 字段仅作最后兜底。
+    let provider = model
+        .as_deref()
+        .and_then(detect_provider)
+        .or_else(|| detect_provider(&name))
+        .or_else(|| {
+            item.get("provider")
+                .and_then(|v| v.as_str())
+                .and_then(Provider::from_id)
+        });
 
     let availability = pick_number(item, "availability_7d")
         .or_else(|| pick_number(item, "availability"))
@@ -635,6 +1010,7 @@ fn parse_channel(item: &Value) -> ChannelStatus {
 
     ChannelStatus {
         name,
+        label,
         online,
         detail,
         status,
@@ -893,6 +1269,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_user_balance_handles_wrappers() {
+        // /user/profile 响应：data 直接是用户对象
+        assert_eq!(
+            parse_user_balance(&serde_json::json!({
+                "code": 0,
+                "data": { "email": "a@b.c", "balance": 12.3, "frozen_balance": 0.5 }
+            })),
+            Some(12.3)
+        );
+        // /auth/me 响应：data.user 包裹
+        assert_eq!(
+            parse_user_balance(&serde_json::json!({
+                "code": 0,
+                "data": { "user": { "balance": -0.004 } }
+            })),
+            Some(-0.004)
+        );
+        // 数字字符串也能解析（as_number 容错）
+        assert_eq!(
+            parse_user_balance(&serde_json::json!({ "balance": "3.2" })),
+            Some(3.2)
+        );
+        assert_eq!(
+            parse_user_balance(&serde_json::json!({ "code": 0, "data": {} })),
+            None
+        );
+    }
+
+    #[test]
     fn web_token_uses_jwt_exp_over_default_ttl() {
         // 载荷 {"user_id":260,"exp":2000000000,"iat":1788406708}
         let jwt = format!("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoyNjAsImV4cCI6MjAwMDAwMDAwMCwiaWF0IjoxNzg4NDA2NzA4fQ.sig");
@@ -1053,6 +1458,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_channel_prefers_model_family_over_compatible_provider_field() {
+        // sub2api 把 DeepSeek 渠道的 provider 标成 openai（兼容口径），应按模型名归入 deepseek
+        let json = serde_json::json!([
+            {
+                "name": "【DeepSeek 稳定】官方池",
+                "provider": "openai",
+                "primary_model": "deepseek-v4-flash",
+                "primary_status": "degraded",
+                "primary_latency_ms": 6112,
+                "availability_7d": 96.8
+            }
+        ]);
+        let channels = parse_channels(&json);
+        assert_eq!(channels[0].provider.as_deref(), Some("deepseek"));
+    }
+
+    #[test]
+    fn v2_matrix_prefers_group_name_over_generic_platform() {
+        let json = serde_json::json!({
+            "data": {
+                "items": [
+                    {
+                        "platform": "openai",
+                        "group_name": "DeepSeek 稳定",
+                        "metrics": { "success_rate": 0.97, "ttft": { "p50_ms": 6112 } },
+                        "health": { "overall": "warning" }
+                    }
+                ]
+            }
+        });
+        let channels = parse_v2_matrix(&json);
+        assert_eq!(channels[0].provider.as_deref(), Some("deepseek"));
+    }
+
+    #[test]
     fn monitored_filter_requires_exact_chat_model() {
         let json = serde_json::json!([
             { "name": "chat", "provider": "openai", "primary_model": "gpt-5.6-sol", "primary_status": "operational" },
@@ -1066,17 +1506,84 @@ mod tests {
     }
 
     #[test]
+    fn family_fallback_keeps_off_version_probe_models() {
+        // 站点探测模型版本与监控配置不一致（监控 grok-4.6 但站点监控 grok-4.5 等）：
+        // 精确匹配清空渠道时，按模型族兜底保留同厂商渠道
+        let json = serde_json::json!([
+            { "name": "Grok｜0.15", "provider": "grok", "primary_model": "grok-4.5", "primary_status": "operational" },
+            { "name": "GPT Pro｜特惠", "provider": "openai", "primary_model": "gpt-5.5", "primary_status": "operational" },
+            { "name": "Claude Max", "provider": "anthropic", "primary_model": "claude-opus-4-6", "primary_status": "operational" },
+            { "name": "DeepSeek｜官方池", "provider": "openai", "primary_model": "deepseek-v4-flash", "primary_status": "degraded" }
+        ]);
+        let parsed = parse_channels(&json);
+        let monitor = serde_json::from_value::<MonitorModels>(serde_json::json!({
+            "gpt": ["gpt-5.6-sol"],
+            "claude": ["claude-opus-5"],
+            "grok": ["grok-4.6"],
+            "deepseek": ["deepseek-chat"]
+        }))
+        .unwrap();
+        assert!(filter_monitored_channels(parsed.clone(), &monitor).is_empty());
+        let filtered = filter_channels_by_family(parsed, &monitor);
+        assert_eq!(filtered.len(), 4);
+        assert!(filtered
+            .iter()
+            .any(|c| c.provider.as_deref() == Some("grok")));
+        // DeepSeek 渠道 provider 字段标成 openai，但按模型名识别为 deepseek 族
+        assert!(filtered
+            .iter()
+            .any(|c| c.model.as_deref() == Some("deepseek-v4-flash")));
+    }
+
+    #[test]
+    fn family_fallback_respects_unwatched_families_and_non_chat() {
+        let json = serde_json::json!([
+            { "name": "Grok｜0.15", "provider": "grok", "primary_model": "grok-4.5", "primary_status": "operational" },
+            { "name": "Kimi｜直连", "provider": "kimi", "primary_status": "operational" },
+            { "name": "image", "provider": "openai", "primary_model": "dall-e-3", "primary_status": "operational" }
+        ]);
+        let monitor = serde_json::from_value::<MonitorModels>(serde_json::json!({
+            "gpt": ["gpt-5.6-sol"]
+        }))
+        .unwrap();
+        let filtered = filter_channels_by_family(parse_channels(&json), &monitor);
+        assert!(filtered.is_empty());
+
+        let monitor_grok = serde_json::from_value::<MonitorModels>(serde_json::json!({
+            "grok": ["grok-4.6"]
+        }))
+        .unwrap();
+        let filtered = filter_channels_by_family(parse_channels(&json), &monitor_grok);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "Grok｜0.15");
+
+        let monitor_kimi = serde_json::from_value::<MonitorModels>(serde_json::json!({
+            "kimi": ["kimi-k3"]
+        }))
+        .unwrap();
+        let filtered = filter_channels_by_family(parse_channels(&json), &monitor_kimi);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "Kimi｜直连");
+    }
+
+    #[test]
     fn group_rates_use_user_override_and_normalized_name() {
         let groups = serde_json::json!({
             "data": [
-                { "id": 9, "name": "GPT 稳定分组 ", "rate_multiplier": 0.08 },
-                { "id": 18, "name": "Grok free", "rate_multiplier": 0.04 }
+                { "id": 9, "name": "GPT 稳定分组 ", "rate_multiplier": 0.08, "platform": "openai" },
+                { "id": 18, "name": "Grok free", "rate_multiplier": 0.04, "platform": "grok" }
             ]
         });
         let overrides = serde_json::json!({ "data": { "9": 0.06 } });
         let rates = parse_group_rates(&groups, &overrides);
-        assert_eq!(rates.get("gpt稳定分组"), Some(&0.06));
-        assert_eq!(rates.get("grokfree"), Some(&0.04));
+        let rate_of = |key: &str| {
+            rates
+                .iter()
+                .find(|g| normalize_group_name(&g.name) == key)
+                .map(|g| g.rate)
+        };
+        assert_eq!(rate_of("gpt稳定分组"), Some(0.06));
+        assert_eq!(rate_of("grokfree"), Some(0.04));
 
         let mut channels = parse_v2_matrix(&serde_json::json!({
             "data": { "items": [{
@@ -1092,13 +1599,16 @@ mod tests {
 
     #[test]
     fn group_rates_match_stale_monitor_labels_without_guessing_ambiguous_groups() {
-        let rates = HashMap::from([
-            (normalize_group_name("Codex｜pro稳定分组"), 0.20),
-            (
-                normalize_group_name("grok|gork free分组（支持grok4.6,上下文500k ）"),
-                0.05,
-            ),
-        ]);
+        let rates = vec![
+            GroupRate {
+                name: "Codex｜pro稳定分组".into(),
+                rate: 0.20,
+            },
+            GroupRate {
+                name: "grok|gork free分组（支持grok4.6,上下文500k ）".into(),
+                rate: 0.05,
+            },
+        ];
         let mut channels = vec![
             parse_channel(&serde_json::json!({
                 "group_name": "Codex｜pro稳定分组 (无限制无视封号警告可随意破限)",
@@ -1112,5 +1622,210 @@ mod tests {
         apply_group_rates(&mut channels, &rates);
         assert_eq!(channels[0].model_ratio, Some(0.20));
         assert_eq!(channels[1].model_ratio, Some(0.05));
+    }
+
+    #[test]
+    fn group_rates_match_renamed_suffix_groups_by_tokens() {
+        // 5yuantoken 实测：站点在分组名后追加了倍率/备注，监控侧保留旧短名
+        let rates = vec![
+            GroupRate {
+                name: "【ChatGPT Pro】特惠 0.18".into(),
+                rate: 0.18,
+            },
+            GroupRate {
+                name: "【ChatGPT Pro】兜底 0.25  官方正价号".into(),
+                rate: 0.25,
+            },
+            GroupRate {
+                name: "【Claude Code】Kiro 0.15".into(),
+                rate: 0.15,
+            },
+            GroupRate {
+                name: "【Claude Code】Kiro 按次 0.025".into(),
+                rate: 1.0,
+            },
+            GroupRate {
+                name: "【Grok heavy】 0.15".into(),
+                rate: 0.15,
+            },
+            GroupRate {
+                name: "【Grok free】 0.1 ".into(),
+                rate: 0.1,
+            },
+            GroupRate {
+                name: "【ChatGPT Plus】特惠 0.1".into(),
+                rate: 0.1,
+            },
+        ];
+        let mut channels = vec![
+            parse_channel(&serde_json::json!({
+                "group_name": "【ChatGPT Pro】特惠",
+                "primary_model": "gpt-5.6-terra"
+            })),
+            parse_channel(&serde_json::json!({
+                "group_name": "【ChatGPT Pro】兜底",
+                "primary_model": "gpt-5.6-terra"
+            })),
+            parse_channel(&serde_json::json!({
+                "group_name": "【Claude Code】Kiro",
+                "primary_model": "claude-sonnet-5"
+            })),
+            parse_channel(&serde_json::json!({
+                "group_name": "【Grok 】0.15",
+                "primary_model": "grok-4.5"
+            })),
+            parse_channel(&serde_json::json!({
+                "group_name": "【Grok 】0.1",
+                "primary_model": "grok-4.5"
+            })),
+            // 同名不同族：仅凭「特惠」二字无法区分 Pro/Plus，宁可缺失
+            parse_channel(&serde_json::json!({
+                "group_name": "【ChatGPT】特惠",
+                "primary_model": "gpt-5.6-terra"
+            })),
+        ];
+        apply_group_rates(&mut channels, &rates);
+        assert_eq!(channels[0].model_ratio, Some(0.18));
+        assert_eq!(channels[1].model_ratio, Some(0.25));
+        // 「Kiro」同时命中 Kiro 0.15 与 Kiro 按次：多出的词元更少者唯一（0.15）才采用
+        assert_eq!(channels[2].model_ratio, Some(0.15));
+        assert_eq!(channels[3].model_ratio, Some(0.15));
+        assert_eq!(channels[4].model_ratio, Some(0.1));
+        assert_eq!(channels[5].model_ratio, None);
+    }
+
+    #[test]
+    fn group_rates_match_by_bracket_prefix_when_words_diverge() {
+        // 5yuan token：分组描述整段改写，只剩【】里的主名可对上
+        let rates = vec![
+            GroupRate {
+                name: "【DeepSeek 稳定】国外版  3.5折".into(),
+                rate: 0.35,
+            },
+            GroupRate {
+                name: "【Claude Code】推荐 1倍率  不限客户端".into(),
+                rate: 1.0,
+            },
+            GroupRate {
+                name: "【Claude Code】推荐 1倍率  仅Claude客户端".into(),
+                rate: 1.0,
+            },
+        ];
+        let mut channels = vec![
+            parse_channel(&serde_json::json!({
+                "group_name": "【DeepSeek 稳定】官方池",
+                "primary_model": "deepseek-v4-flash"
+            })),
+            // 同前缀两个分组：歧义时不猜
+            parse_channel(&serde_json::json!({
+                "group_name": "【Claude Code】Max",
+                "primary_model": "claude-opus-4-6"
+            })),
+        ];
+        apply_group_rates(&mut channels, &rates);
+        assert_eq!(channels[0].model_ratio, Some(0.35));
+        assert_eq!(channels[1].model_ratio, None);
+    }
+
+    #[test]
+    fn group_rates_fall_back_to_monitor_label_and_overlap() {
+        // 5yuantoken 实测：两个监控共用同一个 group_name，真身分组只能靠监控标签区分；
+        // Max 与 Plus 的分组已被站点删除，标签里留着建监控时标注的倍率
+        let rates = vec![
+            GroupRate {
+                name: "【deepseek-v4】2折 自建池".into(),
+                rate: 0.2,
+            },
+            GroupRate {
+                name: "【deepseek-v4 】2.5折   友商".into(),
+                rate: 0.25,
+            },
+            GroupRate {
+                name: "【DeepSeek 稳定】国外版  3.5折".into(),
+                rate: 0.35,
+            },
+            GroupRate {
+                name: "【Claude Code】推荐 1倍率  不限客户端".into(),
+                rate: 1.0,
+            },
+            GroupRate {
+                name: "【Claude Code】推荐 1倍率  仅Claude客户端".into(),
+                rate: 1.0,
+            },
+            GroupRate {
+                name: "【Claude Code】Kiro 0.15".into(),
+                rate: 0.15,
+            },
+            GroupRate {
+                name: "【Claude Code】Kiro 按次 0.025".into(),
+                rate: 1.0,
+            },
+            GroupRate {
+                name: "【ChatGPT Plus】特惠 0.1".into(),
+                rate: 0.1,
+            },
+        ];
+        let mut channels = vec![
+            // 同一 group_name 的两个监控：标签里的「自建池」/「友商」分别对上不同分组
+            parse_channel(&serde_json::json!({
+                "group_name": "【DeepSeek/GLM】友商平价",
+                "name": "DeepSeek自建池｜x0.2",
+                "primary_model": "deepseek-v4-flash"
+            })),
+            parse_channel(&serde_json::json!({
+                "group_name": "【DeepSeek/GLM】友商平价",
+                "name": "DeepSeek/GLM｜友商平价｜x0.25 (Copy) (Copy)",
+                "primary_model": "deepseek-v4-flash"
+            })),
+            // 分组已删除：显示名与标签词元重叠全部平局，最后按标签标注的倍率显示
+            parse_channel(&serde_json::json!({
+                "group_name": "【Claude Code】Max",
+                "name": "Claude Max｜x1.00",
+                "primary_model": "claude-opus-4-6"
+            })),
+            parse_channel(&serde_json::json!({
+                "group_name": "监控分组",
+                "name": "GPT Plus 0.08",
+                "primary_model": "gpt-5.6-terra"
+            })),
+        ];
+        apply_group_rates(&mut channels, &rates);
+        assert_eq!(channels[0].model_ratio, Some(0.2));
+        assert_eq!(channels[1].model_ratio, Some(0.25));
+        assert_eq!(channels[2].model_ratio, Some(1.0));
+        assert_eq!(channels[3].model_ratio, Some(0.08));
+    }
+
+    #[test]
+    fn label_rate_parses_common_notations() {
+        assert_eq!(label_rate("Claude Max｜x1.00"), Some(1.0));
+        assert_eq!(
+            label_rate("DeepSeek/GLM｜友商平价｜x0.25 (Copy)"),
+            Some(0.25)
+        );
+        assert_eq!(label_rate("推荐 ×0.1"), Some(0.1));
+        assert_eq!(label_rate("GPT Plus 0.08"), Some(0.08));
+        assert_eq!(label_rate("claude-sonnet-4-5"), None);
+        assert_eq!(label_rate("gpt-5.6-terra"), None);
+        assert_eq!(label_rate("grok-4.5 上下文500k"), None);
+        assert_eq!(label_rate("qwen3.8 27b"), None);
+    }
+
+    #[test]
+    fn group_rate_name_tokens_keep_cjk_adjacency() {
+        assert_eq!(
+            name_tokens("【ChatGPT Pro】特惠 0.18"),
+            vec!["chatgpt", "pro", "特惠", "0.18"]
+        );
+        assert_eq!(name_tokens("【Grok 】0.1"), vec!["grok", "0.1"]);
+        assert_eq!(
+            name_tokens("【Claude Code】Kiro 按次 0.025"),
+            vec!["claude", "code", "kiro", "按次", "0.025"]
+        );
+        assert_eq!(
+            bracket_content("【DeepSeek 稳定】官方池").as_deref(),
+            Some("deepseek稳定")
+        );
+        assert_eq!(bracket_content("监控分组"), None);
     }
 }
