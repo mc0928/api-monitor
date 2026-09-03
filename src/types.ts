@@ -1,5 +1,11 @@
 export type SiteType = "new2api" | "sub2api";
 
+/** web-login-done 事件负载：内嵌浏览器登录窗口的捕获结果 */
+export interface WebLoginDone {
+  id: string;
+  ok: boolean;
+}
+
 export interface SiteConfig {
   id: string;
   name: string;

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   DndContext,
   closestCenter,
@@ -11,11 +12,12 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { getConfig, saveConfig, testProxy } from "../lib/api";
+import { getConfig, openWebLogin, saveConfig, testProxy } from "../lib/api";
 import { errMsg } from "../lib/errors";
 import { useI18n } from "../lib/i18n";
+import { checkForUpdate, installUpdate, useUpdater } from "../lib/updater";
 import { PROVIDER_META, PROVIDERS, normalizeModels } from "../lib/models";
-import type { AppConfig, ProviderId, SiteConfig, SiteType } from "../types";
+import type { AppConfig, ProviderId, SiteConfig, SiteType, WebLoginDone } from "../types";
 import { ProviderIcon } from "./ProviderIcons";
 
 interface Props {
@@ -49,6 +51,8 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
   const [error, setError] = useState<string | null>(null);
   const [proxyTip, setProxyTip] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [webLoginTip, setWebLoginTip] = useState<string | null>(null);
+  const [webLoginError, setWebLoginError] = useState(false);
 
   const models = config ? normalizeModels(config.monitor?.models) : null;
   const intervalMinutes = config?.refresh?.interval_minutes ?? 1;
@@ -56,6 +60,8 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
   useEffect(() => {
     getConfig()
       .then((cfg) => {
+        setWebLoginTip(null);
+        setWebLoginError(false);
         setConfig({ ...cfg, monitor: { models: normalizeModels(cfg.monitor?.models) } });
         if (mode === "edit") {
           const found = cfg.sites.find((s) => s.id === siteId);
@@ -86,6 +92,39 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
       setProxyTip(errMsg(e));
     }
   };
+
+  /** 内嵌浏览器登录：弹窗内完成登录/人机验证，令牌由后端捕获后经事件回传 */
+  const handleWebLogin = async () => {
+    if (!site) return;
+    if (!/^https?:\/\//i.test(site.base_url.trim())) {
+      setWebLoginTip(t("dialog.webLoginNeedUrl"));
+      setWebLoginError(true);
+      return;
+    }
+    setWebLoginTip(t("dialog.webLoginOpened"));
+    setWebLoginError(false);
+    try {
+      await openWebLogin(site);
+    } catch (e) {
+      setWebLoginTip(`${t("dialog.webLoginError")}：${errMsg(e)}`);
+      setWebLoginError(true);
+    }
+  };
+
+  // 登录窗口的捕获结果只作提示；令牌由后端写入本地缓存（tokens.json），重启后免登录
+  useEffect(() => {
+    if (!site) return;
+    const unlisten = listen<WebLoginDone>("web-login-done", (event) => {
+      const payload = event.payload;
+      if (payload.id !== site.id) return;
+      setWebLoginTip(t(payload.ok ? "dialog.webLoginOk" : "dialog.webLoginFailed"));
+      setWebLoginError(!payload.ok);
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [site?.id]);
 
   const handleSave = async () => {
     if (!config || !models) return;
@@ -249,6 +288,8 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
                 </section>
               )}
 
+              {mode === "settings" && <UpdateSection />}
+
               <section>
                 <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
                   {t("dialog.proxy")}
@@ -272,36 +313,38 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
                 {proxyTip && <p className="mt-1 text-xs text-gray-400">{proxyTip}</p>}
               </section>
 
-              <section>
-                <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                    {t("dialog.monitoredModels")}
-                  </h3>
-                  <button
-                    type="button"
-                    className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-                    onClick={() =>
-                      setConfig({
-                        ...config,
-                        monitor: { models: normalizeModels(null) },
-                      })
-                    }
-                  >
-                    {t("dialog.resetDefaults")}
-                  </button>
-                </div>
-                <p className="mb-2 text-xs text-gray-400">{t("dialog.modelsHint")}</p>
-                <div className="space-y-3">
-                  {PROVIDERS.map((id) => (
-                    <ModelChips
-                      key={id}
-                      provider={id}
-                      models={models?.[id] ?? []}
-                      onChange={(list) => patchModels(id, list)}
-                    />
-                  ))}
-                </div>
-              </section>
+              {mode === "settings" && (
+                <section>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                      {t("dialog.monitoredModels")}
+                    </h3>
+                    <button
+                      type="button"
+                      className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                      onClick={() =>
+                        setConfig({
+                          ...config,
+                          monitor: { models: normalizeModels(null) },
+                        })
+                      }
+                    >
+                      {t("dialog.resetDefaults")}
+                    </button>
+                  </div>
+                  <p className="mb-2 text-xs text-gray-400">{t("dialog.modelsHint")}</p>
+                  <div className="space-y-3">
+                    {PROVIDERS.map((id) => (
+                      <ModelChips
+                        key={id}
+                        provider={id}
+                        models={models?.[id] ?? []}
+                        onChange={(list) => patchModels(id, list)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              )}
 
               {site && (
                 <section>
@@ -364,6 +407,29 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
                           placeholder={t("dialog.password")}
                           onChange={(e) => patchSite({ password: e.target.value })}
                         />
+                        <p className="col-span-2 -mt-1 text-xs text-gray-400">
+                          {t("dialog.sub2apiHint")}
+                        </p>
+                        <div className="col-span-2 -mt-1 flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleWebLogin}
+                            className="shrink-0 rounded-lg border border-blue-300 px-3 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950/40"
+                          >
+                            {t("dialog.webLogin")}
+                          </button>
+                          {webLoginTip && (
+                            <span
+                              className={`text-xs ${
+                                webLoginError
+                                  ? "text-red-500 dark:text-red-400"
+                                  : "text-emerald-600 dark:text-emerald-400"
+                              }`}
+                            >
+                              {webLoginTip}
+                            </span>
+                          )}
+                        </div>
                       </>
                     )}
                   </div>
@@ -414,6 +480,58 @@ export default function SettingsDialog({ mode, siteId, onClose, onSaved }: Props
         </div>
       </div>
     </div>
+  );
+}
+
+/** 设置页「关于与更新」：当前版本 + 检查更新/应用内升级（同 cc-switch 的 About 区块） */
+function UpdateSection() {
+  const { t } = useI18n();
+  const updater = useUpdater();
+
+  const busy = updater.checking || updater.downloading;
+  const label = updater.downloading
+    ? `${t("update.installing")}${updater.progress != null ? ` ${updater.progress}%` : ""}`
+    : updater.availableVersion
+      ? t("update.updateTo", { version: updater.availableVersion })
+      : updater.checking
+        ? t("update.checking")
+        : t("update.check");
+
+  return (
+    <section>
+      <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+        {t("dialog.about")}
+      </h3>
+      <div className="flex flex-wrap items-center gap-3 text-sm">
+        <span className="text-gray-500 dark:text-gray-400">
+          {t("update.currentVersion")}
+          <span className="ml-1 font-medium text-gray-900 dark:text-gray-100">
+            v{updater.currentVersion ?? "…"}
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={() => void (updater.availableVersion ? installUpdate() : checkForUpdate())}
+          disabled={busy}
+          className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+        >
+          {label}
+        </button>
+        {updater.upToDate && !updater.availableVersion && (
+          <span className="text-xs text-emerald-600 dark:text-emerald-400">
+            {t("update.upToDate")}
+          </span>
+        )}
+        {updater.error && (
+          <span className="text-xs text-red-500 dark:text-red-400">
+            {updater.downloading || updater.availableVersion
+              ? t("update.installFailed")
+              : t("update.checkFailed")}
+            ：{updater.error}
+          </span>
+        )}
+      </div>
+    </section>
   );
 }
 

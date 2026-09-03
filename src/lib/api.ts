@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppConfig, SiteResult } from "../types";
+import type { AppConfig, SiteConfig, SiteResult } from "../types";
 
 export const getConfig = () => invoke<AppConfig>("get_config");
 
@@ -13,5 +13,5 @@ export const getResults = () => invoke<SiteResult[]>("get_results");
 
 export const testProxy = () => invoke<string>("test_proxy");
 
-/** 有新版本时返回 tag 名（如 v0.1.1），否则 null */
-export const checkUpdate = () => invoke<string | null>("check_update");
+/** 打开内嵌浏览器登录窗口（sub2api）：窗口内完成登录/人机验证后令牌自动回传 */
+export const openWebLogin = (site: SiteConfig) => invoke<void>("open_web_login", { site });

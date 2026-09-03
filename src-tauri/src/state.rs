@@ -119,8 +119,8 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// sub2api 站点的令牌缓存（仅内存，不落盘）
-#[derive(Debug, Clone)]
+/// sub2api 站点的登录令牌缓存（变更时落盘到 tokens.json，重启后免登录复用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenCache {
     pub auth_token: String,
     pub refresh_token: Option<String>,
@@ -138,13 +138,19 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// 以持久化的上次结果快照构造（重启后立即恢复展示，无需等首次刷新）
+    /// 以持久化的上次结果快照与登录令牌构造（重启后立即恢复展示、免重新登录）
     pub fn with_persisted() -> Self {
         let state = Self::default();
         let persisted = crate::persist::load();
         if !persisted.is_empty() {
             if let Ok(mut map) = state.results.lock() {
                 *map = persisted;
+            }
+        }
+        let tokens = crate::persist::load_tokens();
+        if !tokens.is_empty() {
+            if let Ok(mut map) = state.tokens.lock() {
+                *map = tokens;
             }
         }
         state
@@ -163,11 +169,17 @@ impl AppState {
         if let Ok(mut map) = self.tokens.lock() {
             map.insert(site_id.to_string(), token);
         }
+        self.persist_tokens();
     }
 
     pub fn clear_token(&self, site_id: &str) {
-        if let Ok(mut map) = self.tokens.lock() {
-            map.remove(site_id);
+        let removed = if let Ok(mut map) = self.tokens.lock() {
+            map.remove(site_id).is_some()
+        } else {
+            false
+        };
+        if removed {
+            self.persist_tokens();
         }
     }
 
@@ -191,11 +203,28 @@ impl AppState {
     }
 
     pub fn prune_sites(&self, keep: &[String]) {
+        let mut changed = false;
         if let Ok(mut map) = self.results.lock() {
             map.retain(|id, _| keep.iter().any(|k| k == id));
         }
         if let Ok(mut map) = self.tokens.lock() {
+            let before = map.len();
             map.retain(|id, _| keep.iter().any(|k| k == id));
+            changed = map.len() != before;
+        }
+        if changed {
+            self.persist_tokens();
+        }
+    }
+
+    /// 令牌变更后落盘；失败仅记录日志（令牌丢失最多重新登录一次）
+    fn persist_tokens(&self) {
+        let snapshot = match self.tokens.lock() {
+            Ok(map) => map.clone(),
+            Err(_) => return,
+        };
+        if let Err(e) = crate::persist::save_tokens(&snapshot) {
+            eprintln!("持久化令牌失败: {e}");
         }
     }
 }

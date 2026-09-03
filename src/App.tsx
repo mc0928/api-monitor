@@ -8,7 +8,8 @@ import {
 import ProviderFilter from "./components/ProviderFilter";
 import SettingsDialog from "./components/SettingsDialog";
 import SiteCard from "./components/SiteCard";
-import { checkUpdate, getConfig, getResults, refreshAll, refreshSite, saveConfig } from "./lib/api";
+import { checkForUpdate, dismissUpdate, installUpdate, useUpdater } from "./lib/updater";
+import { getConfig, getResults, refreshAll, refreshSite, saveConfig } from "./lib/api";
 import { errMsg } from "./lib/errors";
 import { useI18n } from "./lib/i18n";
 import { bestAvailability, filterChannels, normalizeModels } from "./lib/models";
@@ -34,7 +35,7 @@ export default function App() {
   const [provider, setProvider] = useState<ProviderId | "all">("all");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
-  const [updateTag, setUpdateTag] = useState<string | null>(null);
+  const updater = useUpdater();
 
   // 通知权限与上轮结果快照（用于刷新后对比出状态变化）
   const notifyAllowedRef = useRef(false);
@@ -52,10 +53,9 @@ export default function App() {
       if (!granted) granted = (await requestPermission()) === "granted";
       notifyAllowedRef.current = granted;
     })();
-    // 启动时检查新版本（失败静默，不打扰）
-    void checkUpdate()
-      .then((tag) => setUpdateTag(tag ?? null))
-      .catch(() => {});
+    // 启动后延迟检查新版本（静默，失败不打扰；同 cc-switch 体验）
+    const timer = setTimeout(() => void checkForUpdate({ silent: true }), 1000);
+    return () => clearTimeout(timer);
   }, []);
 
   /** 对比上一轮结果，状态恶化/恢复时弹系统通知 */
@@ -237,11 +237,16 @@ export default function App() {
   }, [config, results]);
 
   // 手动排序：直接按配置顺序展示；自动：按（筛选后的）最佳成功率降序
+  // 筛选厂商时仅保留含有该厂商渠道的站点；未检查/检查失败的站点无渠道数据，同样不展示
   const sortBy = config?.sort_by ?? "auto";
   const rankedSites = useMemo(() => {
     const sites = config?.sites ?? [];
-    if (sortBy === "manual") return sites;
-    return [...sites].sort((a, b) => {
+    const visible =
+      provider === "all"
+        ? sites
+        : sites.filter((s) => filterChannels(results[s.id]?.channels ?? [], provider).length > 0);
+    if (sortBy === "manual") return visible;
+    return [...visible].sort((a, b) => {
       const score = (id: string) =>
         bestAvailability(filterChannels(results[id]?.channels ?? [], provider));
       return score(b.id) - score(a.id);
@@ -314,9 +319,28 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-5xl px-6 py-6">
-        {updateTag && (
-          <div className="mb-4 flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300">
-            <span>{t("update.available", { version: updateTag })}</span>
+        {updater.availableVersion && !updater.dismissed && (
+          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300">
+            <span>{t("update.available", { version: updater.availableVersion })}</span>
+            <button
+              type="button"
+              onClick={() => void installUpdate()}
+              disabled={updater.downloading}
+              className="rounded-lg bg-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {updater.downloading
+                ? `${t("update.installing")}${updater.progress != null ? ` ${updater.progress}%` : ""}`
+                : t("update.install")}
+            </button>
+            {updater.downloading && updater.progress != null && (
+              <span className="h-1.5 w-32 overflow-hidden rounded-full bg-blue-100 dark:bg-blue-900">
+                <span
+                  className="block h-full rounded-full bg-blue-500 transition-all"
+                  style={{ width: `${updater.progress}%` }}
+                />
+              </span>
+            )}
+            {/* 手动下载入口保留作为应用内更新失败的兜底 */}
             <button
               type="button"
               onClick={() =>
@@ -326,10 +350,14 @@ export default function App() {
             >
               {t("update.download")}
             </button>
+            {updater.error && (
+              <span className="text-xs">{t("update.installFailed")}</span>
+            )}
             <button
               type="button"
-              onClick={() => setUpdateTag(null)}
-              className="ml-auto text-blue-400 hover:text-blue-600 dark:hover:text-blue-200"
+              onClick={dismissUpdate}
+              disabled={updater.downloading}
+              className="ml-auto text-blue-400 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:text-blue-200"
               aria-label="dismiss"
             >
               ✕
@@ -348,6 +376,12 @@ export default function App() {
         {config && config.sites.length === 0 && (
           <div className="rounded-lg border border-dashed border-gray-300 p-10 text-center text-gray-400 dark:border-gray-700">
             {t("load.empty")}
+          </div>
+        )}
+
+        {config && provider !== "all" && rankedSites.length === 0 && (
+          <div className="rounded-lg border border-dashed border-gray-300 p-10 text-center text-gray-400 dark:border-gray-700">
+            {t("filter.noMatch")}
           </div>
         )}
 

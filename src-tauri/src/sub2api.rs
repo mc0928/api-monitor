@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use base64::Engine as _;
 use reqwest::Client;
 use serde_json::Value;
 
@@ -34,7 +35,7 @@ pub async fn check(
         Err(e) => return SiteResult::error(site, e),
     };
 
-    // 401：令牌失效，清除缓存重新登录后再取一次
+    // 401：令牌失效时清缓存重新登录后再取一次
     let (status, body) = if status == 401 {
         state.clear_token(&site.id);
         token = match ensure_token(client, site, state).await {
@@ -51,7 +52,10 @@ pub async fn check(
 
     if status == 401 {
         state.clear_token(&site.id);
-        return SiteResult::error(site, "channel-monitors 返回 401，令牌已失效".to_string());
+        return SiteResult::error(
+            site,
+            "channel-monitors 返回 401，令牌已失效；请重新「浏览器登录」或检查账号密码".to_string(),
+        );
     }
 
     // 倍率接口与监控数据互不依赖，提前并发请求，避免额外串行等待。
@@ -397,7 +401,7 @@ async fn ensure_token(
     let username = site.username.clone().unwrap_or_default();
     let password = site.password.clone().unwrap_or_default();
     if username.trim().is_empty() || password.is_empty() {
-        return Err("未配置账号密码，请在设置中补填".to_string());
+        return Err("未配置账号密码，请在设置中补填，或使用「浏览器登录」获取令牌".to_string());
     }
 
     let new_token = login(client, site, username.trim(), &password).await?;
@@ -424,11 +428,16 @@ async fn login(
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!(
+        let mut message = format!(
             "登录失败（HTTP {}）：{}",
             status,
             truncate(body.trim(), 200)
-        ));
+        );
+        // 站点开启 Cloudflare Turnstile 人机验证时程序无法登录，提示用内嵌浏览器登录
+        if body.to_ascii_lowercase().contains("turnstile") {
+            message.push_str("；该站点开启了人机验证，请在设置中使用「浏览器登录」");
+        }
+        return Err(message);
     }
 
     let value: Value =
@@ -464,6 +473,16 @@ async fn refresh_token(
 
 /// 宽松解析令牌响应：兼容顶层或 data 包裹，token / expires_at 字段名容错
 fn parse_token(value: &Value) -> Option<TokenCache> {
+    parse_token_with_ttl(value, 3600)
+}
+
+/// 内嵌浏览器登录回传的令牌：结构与登录响应同构；拿不到过期时间时
+/// 放宽到 7 天，实际失效交给 401 检测兜底
+pub fn parse_web_token(value: &Value) -> Option<TokenCache> {
+    parse_token_with_ttl(value, 7 * 24 * 3600)
+}
+
+fn parse_token_with_ttl(value: &Value, default_ttl_secs: i64) -> Option<TokenCache> {
     let data = value.get("data").unwrap_or(value);
     let auth_token = data
         .get("auth_token")
@@ -484,8 +503,10 @@ fn parse_token(value: &Value) -> Option<TokenCache> {
                 .and_then(|v| v.as_i64())
                 .map(|secs| now_secs() + secs)
         })
-        // 拿不到过期时间时保守按 1 小时处理
-        .unwrap_or_else(|| now_secs() + 3600);
+        // auth_token 是 JWT 时自带 exp（秒级时间戳），比默认 TTL 更准：
+        // sub2api 的令牌实际只有 24h，按 7 天兜底会长期拿死令牌打接口
+        .or_else(|| jwt_exp(&auth_token))
+        .unwrap_or_else(|| now_secs() + default_ttl_secs);
     let user = data.get("user").unwrap_or(data);
     let balance = pick_number(user, "balance").or_else(|| pick_number(data, "balance"));
     Some(TokenCache {
@@ -494,6 +515,16 @@ fn parse_token(value: &Value) -> Option<TokenCache> {
         expires_at,
         balance,
     })
+}
+
+/// 解码 JWT 载荷里的 exp（base64url 无 padding，形如 header.payload.signature）
+fn jwt_exp(token: &str) -> Option<i64> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let value: Value = serde_json::from_slice(&decoded).ok()?;
+    value.get("exp").and_then(|v| v.as_i64())
 }
 
 /// 宽松解析渠道列表：数组可能在顶层 / data / data.items / channels 下。
@@ -859,6 +890,33 @@ mod tests {
         assert_eq!(token.refresh_token.as_deref(), Some("ref"));
         assert!(token.expires_at > now_secs());
         assert!((token.balance.unwrap() + 0.004).abs() < 0.0001);
+    }
+
+    #[test]
+    fn web_token_uses_jwt_exp_over_default_ttl() {
+        // 载荷 {"user_id":260,"exp":2000000000,"iat":1788406708}
+        let jwt = format!("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoyNjAsImV4cCI6MjAwMDAwMDAwMCwiaWF0IjoxNzg4NDA2NzA4fQ.sig");
+        let json = serde_json::json!({ "auth_token": jwt });
+        let token = parse_web_token(&json).expect("应解析到 token");
+        assert_eq!(token.expires_at, 2_000_000_000);
+    }
+
+    #[test]
+    fn web_token_expired_jwt_not_treated_as_long_lived() {
+        // 载荷 {"user_id":260,"exp":1000000000,"iat":999999999}
+        let jwt = format!("eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoyNjAsImV4cCI6MTAwMDAwMDAwMCwiaWF0Ijo5OTk5OTk5OTl9.sig");
+        let json = serde_json::json!({ "auth_token": jwt });
+        let token = parse_web_token(&json).expect("应解析到 token");
+        // 过期 JWT 不应被当成还有 7 天寿命，ensure_token 会立刻走 refresh/login
+        assert!(token.expires_at <= now_secs() + 60);
+    }
+
+    #[test]
+    fn jwt_exp_handles_non_jwt_and_garbage() {
+        assert_eq!(jwt_exp("not-a-jwt"), None);
+        assert_eq!(jwt_exp("a.!!!.b"), None);
+        // 载荷不含 exp：{"user_id":1}
+        assert_eq!(jwt_exp("e30.eyJ1c2VyX2lkIjoxfQ.c"), None);
     }
 
     #[test]
